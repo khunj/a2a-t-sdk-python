@@ -48,6 +48,7 @@ src/a2a_t/observability/
 ├── __init__.py          # 公共 API 总出口（懒加载，模式同 a2a_t/__init__.py）
 ├── _otel_compat.py      # OTel try/except 导入 + NoOp 降级 + 总开关
 ├── attributes.py        # 属性名常量 + a2at_attribute_extractor（报文→属性提取）
+├── config.py            # A2ATObservabilityConfig
 ├── span.py              # A2ATSpan：手动 Span API（context manager）
 ├── metrics.py           # A2ATMetricsRecorder：L1/L2/L3 指标记录器
 ├── logs.py              # 内部自动报文日志实现（截断/脱敏/开关）
@@ -58,7 +59,7 @@ src/a2a_t/observability/
 │   └── interceptor.py   # A2ATClientInterceptor（结构化实现 Client 拦截器协议）
 └── server/
     ├── __init__.py
-    ├── executor.py      # A2ATAgentExecutorDecorator（结构化包装 AgentExecutor）
+    ├── executor.py      # A2ATAgentExecutorDecorator + observed_executor() 工厂
     └── event_queue.py   # A2ATEventQueueDecorator（结构化包装 EventQueue）
 ```
 
@@ -84,7 +85,7 @@ observability = ["opentelemetry-api>=1.33.0"]
 | Server | `EventQueue.enqueue_event(event)` | `A2ATEventQueueDecorator` 包装，实现 Server 侧 per-event Span |
 | 协议 | `@trace_function(attribute_extractor=...)` | 用户自有函数叠加 A2A-T 属性（可选） |
 
-结构化协议（duck typing）说明：a2a-python 的 `BaseClient` / `DefaultRequestHandler` 调用钩子时不做 isinstance 检查，仅按名称调用方法。适配器收到的 a2a 对象作为运行时参数按结构访问（`.message.metadata`、`.call_context.state` 等），无需 import。
+结构化协议（duck typing）说明：a2a-python 的 `BaseClient` / `DefaultRequestHandler` 调用钩子时不做 isinstance 检查，仅按名称调用方法。适配器收到的 a2a 对象作为运行时参数按结构访问（`.message.metadata`、`.call_context.state` 等），无需 import。适配器访问的**精确字段路径清单见附录 B**（结构化访问映射）——该清单同时是 §9 stub 测试的依据与 a2a-python 升级的兼容性契约。本设计中的钩子行为已针对 **a2a-sdk 1.1.0** 验证。
 
 ### 2.4 逻辑架构
 
@@ -140,13 +141,13 @@ end note
 
 ### 3.2 Trace 属性全景
 
-属性值为 OTel 标量类型（str/int/bool）。属性名常量从 `a2a_t.observability` 导出。
+属性值为 OTel 标量类型（str/int/bool）。属性名常量从 `a2a_t.observability` 导出；扩展 URI 常量**直接复用** `a2a_t.core.metadata` 中的定义（`TASK_T_EXTENSION_URI` 等，含 NL 旧别名），不在 observability 模块内复制，避免漂移。
 
 | 层级 | 属性 | 取值来源 | 提取方式 |
 |------|------|---------|---------|
 | OTel SemConv | `gen_ai.operation.name` | a2a 方法名（send_message / execute / subscribe / push-config-*） | 自动 |
 | OTel SemConv | `gen_ai.conversation.id` | `message.context_id` | 自动 |
-| A2A-T | `extension.name` | metadata 中的 TMF 扩展 URI key 或 `A2A-Extensions` header → `Task-T` / `Negotiation-T` / `Notification-T` / `Authorization-T` | 自动 |
+| A2A-T | `extension.name` | metadata 中的 TMF 扩展 URI key 或 `A2A-Extensions` header → `Task-T` / `Negotiation-T`（含 `Negotiation-T/NL/v1` 旧别名，运行时兼容读取）/ `Notification-T`（含 NL 别名）/ `Authorization-T` | 自动 |
 | A2A-T | `task.id` / `task.status` | `message.task_id`；TaskStatusUpdateEvent.status.state | 自动 |
 | A2A-T | `task.type` | 业务语义分类 | `task_type_provider` 回调 / `apply_task_type()` |
 | A2A-T | `negotiation.id` / `negotiation.round` / `negotiation.max_rounds` / `negotiation.performative` | metadata 的 `negotiationContext{id, round, maxRounds, performative}` | 自动 |
@@ -167,7 +168,11 @@ end note
 ```python
 class A2ATSpan:
     def __init__(self, name: str, *, kind: str = "INTERNAL",
-                 attributes: Mapping[str, str | int | bool] | None = None) -> None
+                 attributes: Mapping[str, str | int | bool] | None = None,
+                 context: object | None = None) -> None
+    # kind 取值: "INTERNAL" | "CLIENT" | "SERVER" | "PRODUCER" | "CONSUMER"（映射 OTel SpanKind）
+    # context: 接受 extract_trace_context() 返回的不透明 Context 作为显式父——
+    #          手动 Server 侧埋点（不经执行器装饰器）时的跨 Agent 父子关联入口
     def __enter__(self) -> A2ATSpan
     def __exit__(self, exc_type, exc_val, exc_tb) -> None   # 成功→OK；异常→ERROR+record_exception
     def set_attribute(self, key: str, value: str | int | bool) -> None
@@ -195,7 +200,10 @@ def trace_facade(obj: Any, *, role: str | None = None,
                  methods: Iterable[str] | None = None) -> Any
 # 遍历 type(obj) 公共方法，在实例上 setattr 包装（functools.wraps 保留签名）
 # Span: a2at.sdk.{role}.{method}，INTERNAL，无自定义属性
-# role 缺省按类型猜测（A2ATClient→client，A2ATServer→server），也可包装任意业务对象
+# role 缺省按类型名字符串猜测（类名含 "Client"→client，含 "Server"→server，否则 "custom"），
+# 不 import a2a_t.client/a2a_t.server
+# 异步语义：inspect.iscoroutinefunction 检测——协程方法以 async 包装器 await 后再结束 Span，
+# 同步方法以普通包装器结束，保证 Span 覆盖真实执行期
 ```
 
 ### 3.4 Metrics API
@@ -205,10 +213,20 @@ def trace_facade(obj: Any, *, role: str | None = None,
 | L1 | `gen_ai.client.operation.duration` | Histogram | s | Client 拦截器自动（与 L3 同一样本双写）+ 手动 |
 | L2 | `gen_ai.client.token.usage` | Histogram | {token} | 仅手动（协议层无 token 信息） |
 | L3 | `a2at.task.request.duration` | Histogram | s | Client 拦截器（流全耗时）/ Server 执行器装饰器（execute 耗时）自动 + 手动 |
-| L3 | `a2at.negotiation.total_rounds` | Counter | 1 | 终结消息经过时自动 + 手动 |
+| L3 | `a2at.negotiation.total_rounds` | Counter | 1 | **仅 Client 拦截器**在终结消息经过时自动记录（Server 侧不记，避免双端重复计数）+ 手动 |
+
+**自动记录样本的属性集**（防止双端样本混入同一总体）：
+
+| 指标 | 自动记录属性 |
+|------|-------------|
+| `gen_ai.client.operation.duration` | `gen_ai.operation.name`、`extension.name`、`a2at.span.side=client` |
+| `a2at.task.request.duration` | `gen_ai.operation.name`、`extension.name`、`a2at.span.side`（`client`/`server`）、`streaming`（true/false，是否流式） |
+| `a2at.negotiation.total_rounds` | `negotiation.id`、`outcome`（accept/reject/abort）、`extension.name` |
+
+> `a2at.span.side` 属性是双端归因维度：Client 拦截器与 Server 执行器装饰器都会记录 `a2at.task.request.duration`（语义不同：流全耗时 vs execute 耗时），后端按 side 维度区分，不混入同一总体。`a2at.negotiation.total_rounds` 因终结消息同时流经两端，**仅 Client 侧记录**。
 
 ```python
-class A2ATMetricsRecorder:   # 链式，方法均返回 self
+class A2ATMetricsRecorder:   # 链式，方法均返回 self；无参构造，内部从全局 MeterProvider 获取 meter，可全局复用
     def task_request_duration(self, duration_s: float, *, attributes=None) -> Self
     def gen_ai_operation_duration(self, duration_s: float, *, operation: str, attributes=None) -> Self
     def gen_ai_token_usage(self, tokens: int, *, token_type: str = "input", attributes=None) -> Self
@@ -216,7 +234,7 @@ class A2ATMetricsRecorder:   # 链式，方法均返回 self
                                  outcome: str, attributes=None) -> Self   # outcome: accept/reject/abort
 ```
 
-Meter 名 `a2at-observability`（`opentelemetry-api` 的 `metrics.get_meter`；未装 OTel 时为 NoOp meter）。`a2at.negotiation.total_rounds` 自动记录时携带 `negotiation.id`、`outcome`（accept/reject/abort）、`extension.name` 属性。
+Meter 与 Tracer 的 instrumentation scope 名称均为 `a2at-observability`（`opentelemetry-api` 的 `metrics.get_meter` / `trace.get_tracer`；未装 OTel 时为 NoOp）。
 
 ### 3.5 传播 API
 
@@ -242,7 +260,17 @@ class A2ATObservabilityConfig:
     record_metrics: bool = True
 ```
 
-Provider 回调统一收到"已提取的 metadata 视图"（消息 metadata + headers 的合并 Mapping），返回属性值或 None（省略属性）。回调抛异常 → 吞掉 + WARNING，属性省略，不影响业务流。
+Provider 回调统一收到"已提取的 metadata 视图"（消息 metadata + headers 的合并 Mapping），返回属性值或 None（省略属性）。`authorization_provider` 返回 Mapping 的键为 `policy_id` / `operation_type` / `risk_level`（与 `apply_authorization()` 参数名对齐），缺失键省略对应属性。回调抛异常 → 吞掉 + WARNING，属性省略，不影响业务流。
+
+配置优先级：**显式构造参数 > 环境变量 > 默认值**（环境变量仅在构造参数未显式传入时生效）。`record_metrics` 仅经构造参数控制，无环境变量。
+
+**Provider 调用点**（各组件在哪个钩子调用哪个 provider）：
+
+| Provider | Client 拦截器 | Server 执行器装饰器 |
+|----------|--------------|-------------------|
+| `task_type_provider` | `before()`（基于请求 metadata 视图） | `execute()` 入口（基于 RequestContext metadata 视图） |
+| `notification_topic_provider` | `before()` | `execute()` 入口 |
+| `authorization_provider` | `before()`（下发方持有结构化数据） | 不调用（Server 无法解析渲染后文本） |
 
 ### 3.7 日志（无公开 API）
 
@@ -251,17 +279,18 @@ Provider 回调统一收到"已提取的 metadata 视图"（消息 metadata + he
 - **自动报文日志（模块内部实现）**：拦截器/执行器装饰器在关键节点自动输出结构化日志（logger 名 `a2at.observability`），截断/脱敏/开关作为内部代码，仅经 `A2ATObservabilityConfig` 暴露配置
 - **手动日志（无 API）**：文档给出使用方直接用 `logging.getLogger(...)` + `LoggingHandler` 的标准样例，并附字段命名约定（与自动日志字段一致、可检索）
 
-自动日志事件约定：
+自动日志事件约定（**仅含钩子可达数据**；各事件由标注组件输出）：
 
-| 事件名 | 级别 | 核心字段 |
-|--------|------|---------|
-| `task.request` | DEBUG | task.id, extension.name, payload |
-| `task.status_changed` | INFO | task.id, task.status |
-| `task.artifact` | INFO | task.id, artifact.name |
-| `negotiation.message` | DEBUG | negotiation.id/round/performative, payload |
-| `authorization.delivery` | INFO | policy.id, operation_type, risk_level, result |
-| `notification.subscription` | INFO | topic, condition |
-| `notification.push` | INFO | topic, event.kind, delivery.result |
+| 事件名 | 输出组件 | 级别 | 核心字段 |
+|--------|---------|------|---------|
+| `task.request` | Client 拦截器 `before()` / 执行器装饰器 `execute()` 入口 | DEBUG | extension.name, payload, task.id（存在时；Client 发起时尚无 task_id 则省略） |
+| `task.status_changed` | 两端（拦截器 `after()` / EventQueue 包装） | INFO | task.id, task.status |
+| `task.artifact` | 两端（同上） | INFO | task.id, artifact.name |
+| `negotiation.message` | 两端（before/execute 入口） | DEBUG | negotiation.id/round/performative, payload |
+| `authorization.delivery` | 执行器装饰器 `execute()` 入口（Authorization-T 报文到达时） | INFO | policy.id, operation_type, risk_level（均来自 provider；无 provider 时仅 extension.name） |
+| `notification.subscription` | 执行器装饰器 `execute()` 入口（Notification-T 报文到达时） | INFO | topic（provider 提供） |
+
+> **超出钩子能力的事件转手动日志**：`notification.push`（推送投递，发生在 a2a-python push sender，本模块无钩子可观测——投递结果属业务侧，由使用方手动 `logging` 记录）与 `authorization.delivery` 的存储 `result` 字段（存储结果在用户 executor 业务逻辑内，装饰器不可见——由使用方在 executor 内手动记录）。
 
 ---
 
@@ -270,10 +299,10 @@ Provider 回调统一收到"已提取的 metadata 视图"（消息 metadata + he
 | 方式 | 接入点 | 适用 | 场景 |
 |------|--------|------|:---:|
 | Client 拦截器 | `ClientFactory.create(card, interceptors=[A2ATClientInterceptor(...)])` 或 `client.add_interceptor(...)` | Client 侧自动追踪 + traceparent 注入 + per-event Span + L1/L3 指标 | 1、2 |
-| 执行器装饰器 | `observed_executor(my_executor, ...)` | Server 侧 traceparent 提取 + A2A-T SERVER Span + 自动 EventQueue 包装 + L3 指标 | 1、2 |
+| 执行器装饰器 | `observed_executor(my_executor, config=A2ATObservabilityConfig(...))` | Server 侧 traceparent 提取 + A2A-T SERVER Span + 自动 EventQueue 包装 + L3 指标 | 1、2 |
 | 门面追踪 | `trace_facade(A2ATClient(...))` / `trace_facade(A2ATServer(...))` | SDK 内部 L4 Span（opt-in，不改源码） | 2（可选） |
 | attribute_extractor | 用户自装饰 `@trace_function(attribute_extractor=a2at_attribute_extractor)` | 用户自有函数叠加 A2A-T 属性 | 1、2（可选） |
-| 手动 API | `A2ATSpan` / `A2ATMetricsRecorder` / `inject_traceparent` | 精细控制、编排根 Span、异步关联（add_link） | 1、2（可选） |
+| 手动 API | `A2ATSpan`（含 `context=` 接收 `extract_trace_context()` 结果）/ `A2ATMetricsRecorder` / `inject_traceparent` / `extract_trace_context` | 精细控制、编排根 Span、手动 Server 埋点、异步关联（add_link） | 1、2（可选） |
 
 ---
 
@@ -282,7 +311,7 @@ Provider 回调统一收到"已提取的 metadata 视图"（消息 metadata + he
 ### 5.0 前置条件
 
 ```bash
-pip install a2a-python "a2a-t-sdk[observability]"
+pip install a2a-sdk "a2a-t-sdk[observability]"
 pip install opentelemetry-sdk opentelemetry-exporter-otlp   # 使用方自行配置 Exporter
 ```
 
@@ -320,12 +349,15 @@ client = client_factory.create(card, interceptors=[A2ATClientInterceptor(config=
 **Server 侧**（在现有 a2a-python 服务端组装中包一层）：
 
 ```python
-from a2a_t.observability import observed_executor
+from a2a_t.observability import observed_executor, A2ATObservabilityConfig
 
+server_config = A2ATObservabilityConfig(notification_topic_provider=my_topic_provider)
 handler = DefaultRequestHandler(
-    agent_executor=observed_executor(MyAgentExecutor()),   # 唯一改动行
+    agent_executor=observed_executor(MyAgentExecutor(), config=server_config),  # 唯一改动行
     task_store=InMemoryTaskStore(), agent_card=card)
 ```
+
+`observed_executor(executor, *, config: A2ATObservabilityConfig | None = None)` 是 `A2ATAgentExecutorDecorator` 的工厂函数（等价 `A2ATAgentExecutorDecorator(executor, config=config)`）。`A2ATClientInterceptor` 构造签名同为 `A2ATClientInterceptor(*, config: A2ATObservabilityConfig | None = None)`。
 
 特征：traceparent 传播、CLIENT/SERVER/event Span、L1/L3 指标、自动报文日志全部生效；A2A-T 属性按报文实际内容提取（若使用方未按 A2A-T 约定填 metadata，则仅 `gen_ai.*`、`task.id`、`streaming.event.kind` 等协议层属性可用，业务属性经 provider 补充）。
 
@@ -357,7 +389,7 @@ a2at_server   = trace_facade(A2ATServer(env_path=env_path))
 特征：
 
 - **属性提取最大化**：`A2ATClient` 生成的报文自带 `metadata[扩展URI]`、`templateUri`、`negotiationContext{id,round,maxRounds,performative}`——拦截器/执行器装饰器自动提取 `extension.name`、`negotiation.*`、`task.id/status`，无需 provider
-- 协商终结消息（performative=ACCEPT/REJECT/ABORT）自动记 `negotiation.total_rounds` 指标
+- 协商终结消息（performative=ACCEPT/REJECT/ABORT）自动记 `negotiation.total_rounds` 指标（仅 Client 拦截器记录）
 - `trace_facade` 覆盖 `generate_task_prompt`、`check_task_prompt`、`validate_*`、协商 12 方法，Span 名称 `a2at.sdk.client.<method>` / `a2at.sdk.server.<method>`，无自定义属性，结果经原生 Span 状态表达
 - 用户业务对象（协商编排器等）同样可用 `trace_facade` 或手动 `A2ATSpan` 获得一致追踪
 
@@ -413,6 +445,8 @@ OSS Agent (Client)                              EMS Agent (Server)
 
 **Trace 树形结构**：
 
+> 注：a2a-python 协议层 SERVER Span（`DefaultRequestHandler` 上 `@trace_class` 创建）是 server 本地 trace 的**独立根**，与本树并列（不提取 traceparent、无属性）；上图中 HTTP 箭头右侧的括号注释即指它。装了 ASGI instrumentation 时它会汇入同一 trace（http.server Span 下），但 A2A-T SERVER Span 的父关系不变。
+
 ```
 CLIENT: a2at.client.send_message (OSS)
 ├── SERVER: a2at.server.execute (EMS)
@@ -427,19 +461,20 @@ CLIENT: a2at.client.send_message (OSS)
 
 ### 6.2 Span 生命周期规则
 
-| Span | 创建点 | 结束点 | 父/关联 |
-|------|--------|--------|---------|
-| CLIENT 请求 Span | `before()` | 非流式：`after()` 单次触发即结束；流式：终止事件时结束；提前 break/异常：`weakref.finalize(context)` 兜底结束 | ambient |
-| CLIENT per-event Span | `after()` 每事件 | 同步结束 | addLink → 请求 Span |
-| SERVER Span | 装饰器 `execute()` 入口 | `execute()` 返回（finally，含异常路径） | 显式 = 提取的 traceparent |
-| INTERNAL per-event Span | `enqueue_event()` | 同步结束 | 显式 = SERVER Span（结束后仍可挂） |
-| L4 门面 Span | `trace_facade` 包装方法入口 | 方法返回/异常（finally） | ambient（用户调用点） |
+| Span | Kind | 创建点 | 结束点 | 父/关联 |
+|------|------|--------|--------|---------|
+| CLIENT 请求 Span | CLIENT | `before()` | 非流式：`after()` 单次触发即结束；流式：终止事件时结束；提前 break/异常：`weakref.finalize(context)` 兜底结束 | ambient |
+| CLIENT per-event Span | CLIENT | `after()` 每事件 | 同步结束 | addLink → 请求 Span |
+| SERVER Span | SERVER | 装饰器 `execute()` 入口 | `execute()` 返回（finally，含异常路径） | 显式 = 提取的 traceparent |
+| SERVER cancel Span | SERVER | 装饰器 `cancel()` 入口（Span 名 `a2at.server.cancel`） | `cancel()` 返回（finally） | 显式 = 提取的 traceparent |
+| INTERNAL per-event Span | INTERNAL | `enqueue_event()` | 同步结束 | 显式 = SERVER Span（结束后仍可挂） |
+| L4 门面 Span | INTERNAL | `trace_facade` 包装方法入口 | 方法返回/异常（finally；协程方法 await 后） | ambient（用户调用点） |
 
 ### 6.3 协商多轮（Negotiation-T）
 
 - **模式 A（无根 Span）**：每轮独立 trace，靠 `negotiation.id` 属性在后端聚合还原（`WHERE negotiation.id=N001 ORDER BY negotiation.round`）
 - **模式 B（有根 Span）**：用户在编排器用 `A2ATSpan("negotiation-orchestrate")` 建根 Span（样例 §5.3），各轮 CLIENT Span 为其子 Span
-- 终结消息（performative=ACCEPT/REJECT/ABORT）经过时：Span 记 `negotiation.total_rounds`，同时记 L3 Counter 指标（含 `negotiation.id`、`outcome` 属性）
+- 终结消息（performative=ACCEPT/REJECT/ABORT）经过时：Span 记 `negotiation.total_rounds`，同时 Client 侧记 L3 Counter 指标（含 `negotiation.id`、`outcome` 属性；Server 侧不记，见 §3.4）
 
 ### 6.4 异步场景关联机制
 
@@ -478,6 +513,10 @@ Server 侧 `enqueue_event()` 接收的与 Client 侧 `StreamResponse` 携带的�
 | `Message` | `role`、`parts`、`task_id` | `message` | `task.id` | `task.request` 关联 |
 | `Task`（状态快照） | `id`、`status.state`、`artifacts` | `task` | `task.id`、`task.status` | — |
 
+> `task.status` 属性取值格式：TaskState 枚举名去掉 `TASK_STATE_` 前缀的小写形式（`working` / `input_required` / `auth_required` / `completed` / `canceled` / `failed` / `rejected`）。
+> `Task` 快照形态主要出现在 subscribe / get_task 等非初始流场景；客户端流式聚合器以 status/artifact/message 三种为主。
+> `final == true` 且 state 非终态：`final` 标志是权威的流结束信号（触发请求 Span 结束与指标记录），但 `streaming.event.kind` 仍按 state 判定（非终态则 `status`）。
+
 三种典型表达在两端的呈现：
 
 - **状态变更** = INTERNAL/linked `a2at.event.status` Span + `task.status` 属性 + `task.status_changed` 日志
@@ -501,7 +540,7 @@ Server 侧 `enqueue_event()` 接收的与 Client 侧 `StreamResponse` 携带的�
 | OTel 未安装 | 模块导入正常（NoOp 降级，`_otel_compat.py` try/except + NoOp 对象，参考 a2a-python 同款）；全部 API 可调用、无异常、无输出；DEBUG 日志提示安装命令 |
 | `OTEL_INSTRUMENTATION_A2AT_SDK_ENABLED=false` | 同上——总开关在导入时读取，关闭时全模块走 NoOp 分支 |
 | a2a-python 未安装 | `a2a_t.observability` 主 API 仍可导入（拦截器/装饰器为结构化实现，不 import a2a）；仅当把拦截器传给 a2a-python 的 Client/Factory 或被包装对象不满足结构协议时，由使用方环境的 a2a-python 报 TypeError——模块自身仅 docstring 标注结构协议要求 |
-| headers 缺失（自定义 builder） | SERVER Span 降级 ambient 父，启动 WARNING |
+| headers 缺失（自定义 builder） | SERVER Span 降级 ambient 父，启动 WARNING。header 读取按大小写不敏感处理（ASGI 规范将 header 名小写化，`traceparent` 查找需兼容） |
 | provider 回调抛异常 | 吞掉 + WARNING 日志，属性省略——回调永不影响业务流 |
 | 属性提取异常（意外结构） | 吞掉 + DEBUG，属性省略 |
 
@@ -510,7 +549,7 @@ Server 侧 `enqueue_event()` 接收的与 Client 侧 `StreamResponse` 携带的�
 全部钩子（拦截器 before/after、executor 装饰器、EventQueue 包装、trace_facade 包装）遵循：
 
 - **任何异常 → 吞掉 + 自身 logger 的 WARNING/exception 日志 → 放行原调用**（装饰器模式：finally 中恢复 original method / original executor）
-- per-event Span 结束采用同步结束 + Client 侧 `weakref.finalize(context)` 兜底（防止用户提前 break 流导致 Span 泄漏）
+- per-event Span 总是同步结束；Client 侧 **请求 Span** 另以 `weakref.finalize(context)` 兜底结束（防止用户提前 break 流导致 Span 泄漏）
 - NoOp 分支零开销设计：NoOp 对象 `__getattr__` 吸收调用，避免每次调用重复判断
 
 ---
@@ -540,3 +579,40 @@ Server 侧 `enqueue_event()` 接收的与 Client 侧 `StreamResponse` 携带的�
 | 6 | `event_callback` 钩子（`ResultAggregator`） | 改为 Client 拦截器 `after()`（流式每事件触发）+ Server EventQueue 包装 | 已验证 a2a-python `after()` 在流式调用中每事件触发一次，无需 ResultAggregator 回调 |
 | 7 | `authorization.*` 从下发报文自动提取 | 改为 provider 回调 / 手动 API 补充 | 本 SDK 报文约定：wire 上为渲染后 prompt 文本（`metadata[扩展URI]=promptText`），非结构化字段 |
 | 8 | 属性 `negotiation.total_rounds` 仅最终轮报文可知 | 补充 `negotiation.max_rounds`、`negotiation.performative` 自动提取 | 本 SDK 报文实际携带 `negotiationContext{id, round, maxRounds, performative}`，可自动获得 |
+| 9 | Authorization-T 调用链中的 `storage_status=stored` Span 属性与 `authorization-apply` 命名 Span | 折叠进"纯手动 API"：存储结果在业务侧，由使用方手动 `A2ATSpan` + `apply_authorization()` 表达 | 装饰器钩子不可见存储结果（业务逻辑内部）；避免 SDK 代管业务状态 |
+| 10 | 大纲 §2（背景/差距分析）与 §7.2（部署架构视图） | 本文档不含对应章节 | 本文档定位为"支撑代码开发的设计"（面向实现者），背景与部署属使用者文档范畴，由后续用户文档承接 |
+
+---
+
+## 附录 B：结构化访问映射（duck-typing 契约）
+
+本模块不 import a2a-python，下表即适配器对 a2a 对象的**全部结构访问点**——§9 的 stub 测试须按此构造，a2a-python 升级时按下表做兼容性检查。已针对 a2a-sdk 1.1.0 验证。
+
+**Client 拦截器（`A2ATClientInterceptor`）访问的 `BeforeArgs` / `AfterArgs` 字段**：
+
+| 对象 | 访问路径 | 用途 |
+|------|---------|------|
+| `BeforeArgs` | `.method` | `gen_ai.operation.name`（方法名：send_message / get_task / push-config-* 等） |
+| `BeforeArgs` | `.input`（`SendMessageRequest` 等请求类型） | `.message.metadata`（扩展 URI key、negotiationContext 提取）；`.message.task_id`；`.message.context_id`（conversation.id）；push-config 类请求的 URL 字段 |
+| `BeforeArgs` | `.context`（`ClientCallContext`，可为 None） | `.state`（存放请求 Span 引用，供 after() addLink）；`.service_parameters`（注入 `traceparent`，随请求成为 HTTP headers） |
+| `AfterArgs` | `.result`（`StreamResponse`，oneof 四形态） | 按 §7.2 映射提取 kind/task.id/task.status/终态判定 |
+| `AfterArgs` | `.method` / `.context` | 同 before；从 `.state` 取回请求 Span 引用做 addLink/结束 |
+
+**Server 执行器装饰器（`A2ATAgentExecutorDecorator`）访问的字段**：
+
+| 对象 | 访问路径 | 用途 |
+|------|---------|------|
+| `RequestContext` | `.call_context.state["headers"]` | 提取 `traceparent`（大小写不敏感）；合并入 provider 的 metadata 视图 |
+| `RequestContext` | `.message.metadata` | 扩展 URI key、negotiationContext、negotiation.total_rounds 终结判定 |
+| `RequestContext` | `.message.task_id` / `.message.context_id` | task.id / conversation.id |
+| `RequestContext` | `.call_context.state` | 写入 `"a2at.span"`（A2ATSpan 句柄，供用户 executor 显式补充属性） |
+| `AgentExecutor` | `.execute(context, event_queue)` / `.cancel(context, event_queue)` | 包装调用；以包装后的 `A2ATEventQueueDecorator` 替换传入 executor 的 `event_queue` |
+
+**EventQueue 包装（`A2ATEventQueueDecorator`）访问的字段**：
+
+| 对象 | 访问路径 | 用途 |
+|------|---------|------|
+| `EventQueue` | `.enqueue_event(event)` | 透传 + per-event Span（按 §7.2 从 event 结构提取属性） |
+| `EventQueue` | 其余方法（`close` 等） | 透传不拦截 |
+
+> 所有访问均为"读属性 + 调方法"的结构访问，无 isinstance / import；stub 测试只需实现上述最小结构。`final` 标志、`status.state` 枚举名、oneof 事件形态的判定均为纯数据检查。
