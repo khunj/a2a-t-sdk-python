@@ -44,3 +44,4 @@ a2a-t-corpus/task/resources/*/output_result_*.json
 dist
 .obsidian.tmp_tests/
 .tmp_tests/
+docs/superpowers/

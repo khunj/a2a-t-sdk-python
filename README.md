@@ -53,6 +53,12 @@ This SDK is primarily aimed at two types of users:
 - Negotiation types: Includes one built-in negotiation type: `information`.
 - Resource organization: Built-in prompt resources are located in `src/a2a_t/prompt_resources` (packaged inside the SDK module), containing `prompts`, `scenarios`, `slots`, and `templates`.
 
+## Observability
+
+The optional observability module (`pip install a2a-t-sdk[observability]`) adds A2A-T telemetry on top of a2a-python with no business-code changes: it injects A2A-T attributes into protocol spans on both the client and the server, keeps W3C traceparent continuity across agents, creates per-event spans for streamed events, records L1/L2/L3 metrics, and emits structured payload logs. The module adapts to a2a-python structurally (no a2a import) and degrades gracefully when OpenTelemetry is absent; a master switch (`OTEL_INSTRUMENTATION_A2AT_SDK_ENABLED=false`) disables all output.
+
+See `a2a-t-sample/observability-sample/` for a runnable end-to-end demo, and `docs/superpowers/specs/2026-09-11-a2at-observability-sdk-design.md` for the design spec.
+
 ## Project Structure
 
 The core code of the repository is located in `src/a2a_t`, with the main modules as follows:
