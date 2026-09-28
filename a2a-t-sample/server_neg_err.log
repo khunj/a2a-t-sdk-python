@@ -1,0 +1,81 @@
+INFO:     Started server process [137640]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+ERROR:    [Errno 10048] error while attempting to bind on address ('127.0.0Failed to detach context
+Traceback (most recent call last):
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\opentelemetry\trace\__init__.py", line 608, in use_span
+    yield span
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\src\a2a_t\observability\server\handler_decorator.py", line 850, in _run_stream
+    async for event in getattr(self._inner, inner_method)(params, context):
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\a2a\server\request_handlers\request_handler.py", line 268, in async_gen_wrapper
+    async for item in inner:
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\a2a\server\request_handlers\request_handler.py", line 379, in async_gen_wrapper
+    async for item in inner:
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\a2a\server\request_handlers\default_request_handler.py", line 462, in on_message_send_stream
+    await self._send_push_notification_if_needed(task_id, event)
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\a2a\utils\telemetry.py", line 242, in async_wrapper
+    result = await func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\a2a\server\request_handlers\default_request_handler.py", line 360, in _send_push_notification_if_needed
+    await self._push_sender.send_notification(task_id, event)
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\a2a\server\tasks\base_push_notification_sender.py", line 80, in send_notification
+    results = await asyncio.gather(*awaitables)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\src\a2a_t\observability\server\handler_decorator.py", line 435, in _dispatch_with_span
+    return await dispatch(event, push_info, task_id)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\a2a\server\tasks\base_push_notification_sender.py", line 104, in _dispatch_notification
+    response = await self._client.post(
+               ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpx\_client.py", line 1859, in post
+    return await self.request(
+           ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpx\_client.py", line 1540, in request
+    return await self.send(request, auth=auth, follow_redirects=follow_redirects)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpx\_client.py", line 1643, in send
+    raise exc
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpx\_client.py", line 1637, in send
+    await response.aread()
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpx\_models.py", line 979, in aread
+    self._content = b"".join([part async for part in self.aiter_bytes()])
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpx\_models.py", line 997, in aiter_bytes
+    async for raw_bytes in self.aiter_raw():
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpx\_models.py", line 1055, in aiter_raw
+    async for raw_stream_bytes in self.stream:
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpx\_client.py", line 176, in __aiter__
+    async for chunk in self._stream:
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpx\_transports\default.py", line 271, in __aiter__
+    async for part in self._httpcore_stream:
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpcore\_async\connection_pool.py", line 407, in __aiter__
+    raise exc from None
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpcore\_async\connection_pool.py", line 403, in __aiter__
+    async for part in self._stream:
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpcore\_async\http11.py", line 341, in __aiter__
+    await self.aclose()
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpcore\_async\http11.py", line 348, in aclose
+    await self._connection._response_closed()
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpcore\_async\http11.py", line 239, in _response_closed
+    async with self._state_lock:
+               ^^^^^^^^^^^^^^^^
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\httpcore\_synchronization.py", line 77, in __aenter__
+    await self._anyio_lock.acquire()
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 1829, in acquire
+    await AsyncIOBackend.cancel_shielded_checkpoint()
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\anyio\_backends\_asyncio.py", line 2398, in cancel_shielded_checkpoint
+    await sleep(0)
+  File "C:\cache\uv\python\cpython-3.12-windows-x86_64-none\Lib\asyncio\tasks.py", line 656, in sleep
+    await __sleep0()
+  File "C:\cache\uv\python\cpython-3.12-windows-x86_64-none\Lib\asyncio\tasks.py", line 650, in __sleep0
+    yield
+asyncio.exceptions.CancelledError: Cancelled via cancel scope 15db0b50260 by <Task pending name='sse_starlette.sse.EventSourceResponse.__call__.<locals>.cancel_on_finish' coro=<EventSourceResponse.__call__.<locals>.cancel_on_finish() running at C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\sse_starlette\sse.py:510> cb=[TaskGroup._spawn.<locals>.task_done() at C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\anyio\_backends\_asyncio.py:821]>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\opentelemetry\context\__init__.py", line 135, in detach
+    _RUNTIME_CONTEXT.detach(token)
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\opentelemetry\context\contextvars_context.py", line 42, in detach
+    self._current_context.reset(token)
+ValueError: <Token var=<ContextVar name='current_context' default={} at 0x0000015DB0463650> at 0x0000015DB1FB79C0> was created in a different Context

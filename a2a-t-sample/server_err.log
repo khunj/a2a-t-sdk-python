@@ -1,0 +1,17 @@
+INFO:     Started server process [202948]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+ERROR:    [Errno 10048] error while attempting to bind on address ('127.0.Failed to detach context
+Traceback (most recent call last):
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\opentelemetry\context\__init__.py", line 135, in detach
+    _RUNTIME_CONTEXT.detach(token)
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\opentelemetry\context\contextvars_context.py", line 42, in detach
+    self._current_context.reset(token)
+ValueError: <Token var=<ContextVar name='current_context' default={} at 0x00000186B14EC720> at 0x00000186B3009880> was created in a different Context
+Failed to detach context
+Traceback (most recent call last):
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\opentelemetry\context\__init__.py", line 135, in detach
+    _RUNTIME_CONTEXT.detach(token)
+  File "C:\Users\z00930736\IdeaProjects\a2a-t-sdk-python\.venv\Lib\site-packages\opentelemetry\context\contextvars_context.py", line 42, in detach
+    self._current_context.reset(token)
+ValueError: <Token var=<ContextVar name='current_context' default={} at 0x00000186B14EC720> at 0x00000186B30BC400> was created in a different Context
