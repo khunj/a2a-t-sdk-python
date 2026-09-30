@@ -144,6 +144,8 @@ async def run(scenario: str) -> None:
 
 
 def main() -> None:
+    # Set service.name BEFORE any OTel/Langfuse init so the Resource is correct
+    os.environ.setdefault("OTEL_SERVICE_NAME", "a2a-t-oss-client")
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--scenario",

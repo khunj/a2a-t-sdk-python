@@ -192,6 +192,13 @@ def main() -> None:
         help="executor: native=Task-T streaming, negotiation=Negotiation-T terminal Message",
     )
     args = parser.parse_args()
+    # Set service.name BEFORE any OTel/Langfuse init so the Resource is correct
+    os.environ.setdefault("OTEL_SERVICE_NAME", "a2a-t-ems-server")
+    # Langfuse backend: activated when LANGFUSE_PUBLIC_KEY/SECRET_KEY are set;
+    # sets the global TracerProvider so all A2A-T spans flow into Langfuse cloud.
+    from obs_sample.langfuse_setup import setup_langfuse_if_configured
+
+    setup_langfuse_if_configured()
     uvicorn.run(build_app(scenario=args.scenario), host="127.0.0.1", port=_sample_port())
 
 

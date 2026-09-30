@@ -1,6 +1,6 @@
 """Verify A2A-T observability spans flow into Langfuse cloud."""
-import os
 import asyncio
+import os
 
 # 1. Langfuse init (reads LANGFUSE_* env vars or explicit params)
 os.environ["LANGFUSE_PUBLIC_KEY"] = "pk-lf-661d8d9f-d5e1-4bd4-ae9f-68c7f1c93b8a"
@@ -13,13 +13,16 @@ lf = Langfuse()
 print("Langfuse initialized, base_url:", os.environ.get("LANGFUSE_BASE_URL"))
 
 # Langfuse v4 sets a global TracerProvider — our setup() will detect it and skip
-from opentelemetry import trace
+from opentelemetry import trace  # noqa: E402
+
 tp = trace.get_tracer_provider()
 print(f"TracerProvider after Langfuse init: {type(tp).__name__}")
 
 # 2. A2A-T observability decorators (should use Langfuse's provider)
-from a2a_t.observability.client.transport_decorator import A2ATClientTransportDecorator
-from a2a_t.observability.config import A2ATObservabilityConfig
+from a2a_t.observability.client.transport_decorator import (  # noqa: E402
+    A2ATClientTransportDecorator,
+)
+
 
 # Simulate: create a decorator around a fake inner transport
 class FakeInner:
