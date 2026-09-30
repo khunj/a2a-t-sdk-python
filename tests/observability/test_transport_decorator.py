@@ -29,6 +29,9 @@ from a2a_t.observability.attributes import (
     ATTR_TASK_ID,
     ATTR_TASK_STATUS,
     ATTR_TASK_TYPE,
+    NEGOTIATION_EXTENSION,
+    NEGOTIATION_SUFFIX,
+    is_negotiation_message,
 )
 from a2a_t.observability.client import transport_decorator
 from a2a_t.observability.client.transport_decorator import A2ATClientTransportDecorator
@@ -605,3 +608,17 @@ async def test_simple_methods_create_named_client_spans(
     assert [span.name for span in spans] == [span_name]
     assert spans[0].kind == SpanKind.CLIENT
     assert (spans[0].attributes or {})[ATTR_GEN_AI_OPERATION_NAME] == span_name
+
+
+def test_is_negotiation_message_detects_extension_uri() -> None:
+    assert is_negotiation_message(FakeMessage({_NEGOTIATION_T_URI: "offer"})) is True
+
+
+def test_is_negotiation_message_rejects_plain_metadata() -> None:
+    assert is_negotiation_message(FakeMessage({_TASK_T_URI: "regular"})) is False
+    assert is_negotiation_message(FakeMessage({})) is False
+
+
+def test_negotiation_constants_values() -> None:
+    assert NEGOTIATION_EXTENSION == "Negotiation-T"
+    assert NEGOTIATION_SUFFIX == "-negotiation"

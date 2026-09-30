@@ -146,6 +146,21 @@ def extract_negotiation_attributes(metadata: dict[str, Any]) -> dict[str, Attrib
     return attrs
 
 
+#: Negotiation-T extension identity shared by both decorators (v3 addendum).
+NEGOTIATION_EXTENSION = "Negotiation-T"
+#: Span-name suffix for negotiation spans (``SendMessage-negotiation`` etc.).
+NEGOTIATION_SUFFIX = "-negotiation"
+
+
+def is_negotiation_message(message: Any) -> bool:
+    """True when the message metadata carries the Negotiation-T extension key."""
+    try:
+        metadata = normalize_metadata(_safe_getattr(message, "metadata"))
+    except Exception:  # noqa: BLE001
+        return False
+    return any(extension_name_from_uri(str(key)) == NEGOTIATION_EXTENSION for key in metadata)
+
+
 def _extension_name_from_metadata(metadata: dict[str, Any]) -> str | None:
     for key in metadata:
         name = extension_name_from_uri(str(key))

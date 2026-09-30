@@ -72,11 +72,14 @@ from a2a_t.observability.attributes import (
     DEFAULT_NOTIFICATION_TOPIC_REGEX,
     DEFAULT_TASK_TYPE_REGEX,
     EVENT_LOG_KINDS,
+    NEGOTIATION_EXTENSION,
+    NEGOTIATION_SUFFIX,
     EventInfo,
     classify_event,
     extension_name_from_uri,
     extract_negotiation_attributes,
     extract_request_attributes,
+    is_negotiation_message,
     normalize_metadata,
     unwrap_stream_response,
 )
@@ -92,10 +95,10 @@ logger = logging.getLogger("a2at.observability")
 _SEND_MESSAGE = "SendMessage"
 _SEND_STREAMING_MESSAGE = "SendStreamingMessage"
 _SUBSCRIBE = "SubscribeToTask"
-_NEGOTIATION_SUFFIX = "-negotiation"
+_NEGOTIATION_SUFFIX = NEGOTIATION_SUFFIX
 _EVENT_SPAN_NAME = "SendStreamingMessage-event"
 _ERROR_SPAN_NAME = "SendStreamingMessage-error"
-_NEGOTIATION_EXTENSION = "Negotiation-T"
+_NEGOTIATION_EXTENSION = NEGOTIATION_EXTENSION
 
 _METRIC_GEN_AI_DURATION = "gen_ai.client.operation.duration"
 _METRIC_TASK_DURATION = "a2at.task.request.duration"
@@ -131,11 +134,6 @@ def _extension_from_metadata(metadata: dict[str, Any]) -> str | None:
         if name:
             return name
     return None
-
-
-def _is_negotiation_message(message: Any) -> bool:
-    metadata = normalize_metadata(_safe_getattr(message, "metadata"))
-    return any(extension_name_from_uri(str(key)) == _NEGOTIATION_EXTENSION for key in metadata)
 
 
 def _unwrap(event: Any) -> Any:
@@ -404,7 +402,7 @@ class A2ATClientTransportDecorator:
         try:
             candidate = _unwrap(result)
             info = classify_event(candidate)
-            if info.kind == "message" and _is_negotiation_message(candidate):
+            if info.kind == "message" and is_negotiation_message(candidate):
                 if entry_span is not None:
                     self._emit_negotiation_span(entry_span, method, info, candidate)
                 self._log_negotiation(info)
@@ -506,7 +504,7 @@ class A2ATClientTransportDecorator:
         candidate = _unwrap(event)
         info = classify_event(candidate)
         if info.kind == "message":
-            if _is_negotiation_message(candidate):
+            if is_negotiation_message(candidate):
                 if entry_span is not None:
                     self._emit_negotiation_span(entry_span, _SEND_STREAMING_MESSAGE, info, candidate)
                 self._log_negotiation(info)
