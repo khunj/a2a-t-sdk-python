@@ -1,4 +1,4 @@
-"""Observability sample client (v3.0 decorator architecture).
+﻿"""Observability sample client (v3.0 decorator architecture).
 
 ``register_client_factory(factory)`` decorates every client produced by the factory:
 ``factory.create(card)`` returns a client whose transport is wrapped automatically —
@@ -33,6 +33,12 @@ _SAMPLE_INPUT = "请生成一个Incident事件订阅任务：通知主题为Inci
 
 
 async def run(scenario: str) -> None:
+    # Langfuse backend: activated when LANGFUSE_PUBLIC_KEY/SECRET_KEY are set;
+    # sets the global TracerProvider so all A2A-T spans flow into Langfuse cloud.
+    from obs_sample.langfuse_setup import setup_langfuse_if_configured
+
+    setup_langfuse_if_configured()
+
     port = int(os.environ.get("A2AT_OBS_SAMPLE_PORT", "8100"))
     httpx_client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False)
     factory = ClientFactory(
