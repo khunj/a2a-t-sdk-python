@@ -414,7 +414,7 @@ async def test_e2e_trace_continuity_event_spans_and_metrics(otel_setup: tuple[An
     server_events = [
         span
         for span in spans
-        if span.name == "SendStreamingMessage-event" and span.kind is SpanKind.INTERNAL
+        if span.name == "SendStreamingMessage-event" and span.kind is SpanKind.SERVER
     ]
     assert len(client_events) == 4
     assert len(server_events) == 4
@@ -422,7 +422,7 @@ async def test_e2e_trace_continuity_event_spans_and_metrics(otel_setup: tuple[An
     assert all(
         span.links and link.context.span_id == client_entry.context.span_id for span in client_events for link in span.links
     )
-    assert all(span.kind is SpanKind.INTERNAL for span in server_events)
+    assert all(span.kind is SpanKind.SERVER for span in server_events)
     assert all(span.parent is not None and span.parent.span_id == server_entry.context.span_id for span in server_events)
     assert {(span.attributes or {}).get("gen_ai.agent.a2at.streaming.event.kind") for span in server_events} == {
         "status",

@@ -290,7 +290,7 @@ class _ObservabilityEventQueue:
         try:
             tracer: Any = _otel_compat.get_tracer()
             span = tracer.start_span(
-                _EVENT_SPAN_NAME, kind=_otel_compat.SpanKind.INTERNAL, context=self._record.otel_context
+                _EVENT_SPAN_NAME, kind=_otel_compat.SpanKind.SERVER, context=self._record.otel_context
             )
             if span is None:
                 return None

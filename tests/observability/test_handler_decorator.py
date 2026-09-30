@@ -326,7 +326,7 @@ async def test_stream_entry_and_per_event_parent_spans(exporter: InMemorySpanExp
     event_spans = [span for span in spans if span.name == "SendStreamingMessage-event"]
     assert len(event_spans) == 3
     for span in event_spans:
-        assert span.kind == SpanKind.INTERNAL
+        assert span.kind == SpanKind.SERVER
         assert span.parent is not None
         assert span.parent.span_id == entry.context.span_id
         attrs = span.attributes or {}
