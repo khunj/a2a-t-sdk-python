@@ -67,6 +67,7 @@ _A2AT_SPAN_NAMES = frozenset(
         "SendStreamingMessage-event",
         "SendStreamingMessage-error",
         "SendStreamingMessage-negotiation",
+        "SendMessage-negotiation",
         "SendMessage-pushNotification",
     }
 )
@@ -484,7 +485,16 @@ async def test_e2e_negotiation_span(otel_setup: tuple[Any, Any]) -> None:
 
     spans = _a2at_spans(exporter.get_finished_spans())
     client_entry = _find(spans, "SendStreamingMessage", side="client")
-    negotiation = _find(spans, "SendStreamingMessage-negotiation")
+    client_negotiations = [
+        span for span in spans if span.name == "SendStreamingMessage-negotiation" and span.kind is SpanKind.CLIENT
+    ]
+    server_negotiations = [
+        span for span in spans if span.name == "SendStreamingMessage-negotiation" and span.kind is SpanKind.SERVER
+    ]
+    assert len(client_negotiations) == 1
+    assert len(server_negotiations) == 1
+    negotiation = client_negotiations[0]
+    server_negotiation = server_negotiations[0]
 
     assert negotiation.kind is SpanKind.CLIENT
     assert negotiation.parent is not None
@@ -497,6 +507,14 @@ async def test_e2e_negotiation_span(otel_setup: tuple[Any, Any]) -> None:
     assert attrs["gen_ai.agent.a2at.negotiation.max_rounds"] == 5
     assert attrs["gen_ai.agent.a2at.negotiation.performative"] == "ACCEPT"
     assert attrs["gen_ai.agent.a2at.negotiation.total_rounds"] == 3
+
+    server_entry = _find(spans, "SendStreamingMessage", side="server")
+    assert server_negotiation.parent is not None
+    assert server_negotiation.parent.span_id == server_entry.context.span_id
+    server_attrs = server_negotiation.attributes or {}
+    assert server_attrs["gen_ai.agent.a2at.negotiation.id"] == "N-e2e"
+    assert server_attrs["gen_ai.agent.a2at.negotiation.performative"] == "ACCEPT"
+    assert server_attrs["gen_ai.agent.a2at.extension.name"] == "Negotiation-T"
 
 
 async def test_e2e_sync_message_response_attributes_no_extra_spans(otel_setup: tuple[Any, Any]) -> None:
