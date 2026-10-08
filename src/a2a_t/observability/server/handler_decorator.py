@@ -289,7 +289,7 @@ def _log_negotiation(info: EventInfo, config: A2ATObservabilityConfig) -> None:
 
 
 class _ObservabilityEventQueue:
-    """EventQueue wrapper: per-event INTERNAL span PARENT to the server entry span (spec 3.3/4.4)."""
+    """EventQueue wrapper: per-event SERVER span PARENT to the server entry span (spec 3.3/4.4)."""
 
     def __init__(self, inner: Any, record: _EntryRecord, config: A2ATObservabilityConfig) -> None:
         self._inner = inner

@@ -516,6 +516,10 @@ async def test_e2e_negotiation_span(otel_setup: tuple[Any, Any]) -> None:
     assert server_attrs["gen_ai.agent.a2at.negotiation.performative"] == "ACCEPT"
     assert server_attrs["gen_ai.agent.a2at.extension.name"] == "Negotiation-T"
 
+    # D1 replace semantics: the negotiation Message response replaces the event stream,
+    # so the server must have emitted zero per-event spans.
+    assert not [s for s in spans if s.name == "SendStreamingMessage-event" and s.kind is SpanKind.SERVER]
+
 
 async def test_e2e_sync_message_response_attributes_no_extra_spans(otel_setup: tuple[Any, Any]) -> None:
     """Assertion 6 (rule 3): non-negotiation Message response enriches the entry span; no new spans."""
