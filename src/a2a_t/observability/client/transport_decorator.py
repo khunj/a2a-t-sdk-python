@@ -531,12 +531,18 @@ class A2ATClientTransportDecorator:
             log_event("task.status_changed", logging.INFO, fields=fields, config=self._config)
 
     def _is_stream_end(self, event: Any) -> bool:
-        """Spec 7.3: final/terminal status, terminal Task snapshot, or Message response."""
+        """Spec 7.3 (a2a-java aligned, 2026-09-30 addendum D5): terminal events only.
+
+        Mirrors a2a-java ``AbstractSSEEventListener.shouldAutoClose``: a final
+        status update or a terminal Task snapshot ends the stream. A Message in
+        the stream does NOT terminate consumption — non-task single-response
+        flows end when the server closes the stream.
+        """
         try:
             info = classify_event(_unwrap(event))
         except Exception:  # noqa: BLE001
             return False
-        return info.kind == "message" or info.is_terminal
+        return bool(info.is_terminal)
 
     def _capture_response_payload(self, span: Any, final_event: Any) -> None:
         """Channel-1 payload attr onto the span (when present) + channel-2 log."""

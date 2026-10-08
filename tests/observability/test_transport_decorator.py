@@ -249,6 +249,37 @@ async def test_streaming_negotiation_message_creates_parent_span(exporter: InMem
     assert attrs["gen_ai.agent.a2at.negotiation.performative"] == "PROPOSE"
 
 
+async def test_streaming_continues_after_negotiation_message_until_terminal(
+    exporter: InMemorySpanExporter,
+) -> None:
+    """a2a-java 对齐（2026-09-30 addendum D5）：流内 Message 不终止消费。
+
+    协商 Message 之后的 completed 事件继续投递给客户端；流仅由终态事件
+    （final status / 终态 Task 快照）结束——对齐 a2a-java
+    ``AbstractSSEEventListener.shouldAutoClose``。
+    """
+    metadata = {
+        _NEGOTIATION_T_URI: "counter-offer",
+        "negotiationContext": {"id": "N5", "round": 2, "maxRounds": 5, "performative": "PROPOSE"},
+    }
+    message = FakeMessage(metadata, task_id="T18", context_id="C18")
+    completed = make_final_event("T18")
+    inner = FakeStreamingTransport([message, completed])
+    decorator = A2ATClientTransportDecorator(inner)
+    request = make_send_request({}, task_id="T18", context_id="C18")
+
+    collected = [event async for event in decorator.send_message_streaming(request, context=FakeContext())]
+
+    assert collected == [message, completed]
+    spans = exporter.get_finished_spans()
+    negotiations = [span for span in spans if span.name.endswith("-negotiation")]
+    assert len(negotiations) == 1
+    assert negotiations[0].parent is not None
+    event_spans = [span for span in spans if span.name == "SendStreamingMessage-event"]
+    assert len(event_spans) == 1
+    assert (event_spans[0].attributes or {})[ATTR_TASK_STATUS] == "completed"
+
+
 async def test_streaming_non_negotiation_message_sets_entry_attrs_only(exporter: InMemorySpanExporter) -> None:
     message = FakeMessage({_TASK_T_URI: "regular reply"}, task_id="T3", context_id="C3")
     inner = FakeStreamingTransport([message])
