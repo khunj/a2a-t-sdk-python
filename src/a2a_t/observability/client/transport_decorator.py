@@ -15,9 +15,9 @@ Wraps every ``ClientTransport`` method with a2a-java-parity client spans:
 
 Everything is structural (no a2a import) and guarded: observability failures are
 swallowed with a WARNING on logger ``a2at.observability`` and never break the
-business flow. Signal semantics follow spec §8.1: the decorator is a full
+business flow. Signal semantics follow spec 搂8.1: the decorator is a full
 pass-through only when OTel is unavailable or the master switch is off; with
-``A2AT_TRACE_ENABLED=false`` it stays active — no spans are produced, but
+``A2AT_TRACE_ENABLED=false`` it stays active 鈥?no spans are produced, but
 metrics and logs keep working.
 
 Regex attributes (``task.type`` / ``notification.topic`` /
@@ -37,8 +37,8 @@ from __future__ import annotations
 import dataclasses
 import logging
 import time
-from collections.abc import AsyncIterator, MutableMapping
-from contextlib import nullcontext
+from collections.abc import AsyncIterator, Iterator, MutableMapping
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 from a2a_t.observability import _otel_compat
@@ -134,6 +134,33 @@ def _extension_from_metadata(metadata: dict[str, Any]) -> str | None:
         if name:
             return name
     return None
+
+
+@contextmanager
+def _use_entry_span_current(span: Any) -> Iterator[None]:
+    """Attach ``span`` as the current span, with a leak-proof restore (D5 follow-up).
+
+    a2a-sdk consumes SSE streams across async contexts: OTel's ``detach`` can fail
+    ("Token was created in a different Context") and the exception is swallowed
+    inside ``opentelemetry.context.detach`` - which leaks the attached entry span
+    into the ambient context. Subsequent requests would then chain into the same
+    trace (observed in the multi-round negotiation sample). Snapshot the ambient
+    context before attaching and force-restore it when detach fails. Legitimate
+    ambient inheritance (e.g. an orchestrator ``A2ATSpan`` root, spec 6.3 mode B)
+    is preserved via the snapshot.
+    """
+    if not _otel_compat.is_enabled():
+        return
+    previous = _otel_compat.otel_context.get_current()
+    token = _otel_compat.otel_context.attach(_otel_compat.otel_trace.set_span_in_context(span))
+    try:
+        yield
+    finally:
+        try:
+            _otel_compat.otel_context.detach(token)
+        except Exception:  # noqa: BLE001 - OTel swallows too; restore explicitly
+            logger.warning("a2at: entry span context detach failed; restoring ambient snapshot")
+            _otel_compat.otel_context.attach(previous)
 
 
 def _unwrap(event: Any) -> Any:
@@ -234,7 +261,7 @@ class A2ATClientTransportDecorator:
     # ------------------------------------------------------------------
 
     def _decorator_active(self) -> bool:
-        """Master gate (spec §8.1): full pass-through only when OTel is unavailable/off.
+        """Master gate (spec 搂8.1): full pass-through only when OTel is unavailable/off.
 
         Trace-off (``A2AT_TRACE_ENABLED=false``) is NOT a pass-through: the
         decorator stays active, skips span creation only, and metrics/logs keep
@@ -254,14 +281,26 @@ class A2ATClientTransportDecorator:
 
     def _start_entry_span(self, name: str, request: Any, context: Any) -> Any | None:
         if not _otel_compat.is_trace_enabled() or not self._config.trace_enabled:
-            # Spec §8.1: trace off → no span; metrics/logs stay active. The LLM
-            # stash is span-bound (channel 1) — drop it so it cannot leak into a
+            # Spec 搂8.1: trace off 鈫?no span; metrics/logs stay active. The LLM
+            # stash is span-bound (channel 1) 鈥?drop it so it cannot leak into a
             # later request's entry span.
             clear_llm_usage()
             return None
         try:
             tracer: Any = _otel_compat.get_tracer()
-            span = tracer.start_span(name, kind=_otel_compat.SpanKind.CLIENT)
+            # Client entry spans are ALWAYS trace roots: explicitly detach them
+            # from the ambient context. a2a-sdk consumes SSE streams across async
+            # contexts, where OTel's detach can fail silently (the exception is
+            # swallowed inside opentelemetry.context.detach), leaking the
+            # PREVIOUS request's entry span into the ambient - the multi-round
+            # negotiation flow then chained every request into one trace.
+            # Cross-request correlation is by attributes (negotiation.id /
+            # task.id, spec 6.3 mode A) or explicit inject_traceparent, never by
+            # ambient inheritance.
+            root_context = _otel_compat.otel_trace.set_span_in_context(
+                _otel_compat.NonRecordingSpan(_otel_compat.INVALID_SPAN_CONTEXT)
+            )
+            span = tracer.start_span(name, kind=_otel_compat.SpanKind.CLIENT, context=root_context)
             if span is None:
                 return None
             self._set_request_attributes(span, request, name)
@@ -352,7 +391,7 @@ class A2ATClientTransportDecorator:
                 operation_type = authorization.get(ATTR_AUTHORIZATION_POLICY_OPERATION_TYPE)
                 if operation_type:
                     span.set_attribute(ATTR_AUTHORIZATION_POLICY_OPERATION_TYPE, operation_type)
-        except Exception:  # noqa: BLE001 - spec 8.1: regex failure → DEBUG + omit
+        except Exception:  # noqa: BLE001 - spec 8.1: regex failure 鈫?DEBUG + omit
             logger.debug("a2at: regex attribute extraction failed", exc_info=True)
 
     def _inject_traceparent(self, context: Any, span: Any) -> None:
@@ -397,7 +436,7 @@ class A2ATClientTransportDecorator:
         """Rule 3: response attributes onto the entry span / negotiation span (spec 3.1).
 
         Span-only work is skipped when ``entry_span`` is None (trace off), but the
-        negotiation log still fires (§8.1: logs survive trace-off).
+        negotiation log still fires (搂8.1: logs survive trace-off).
         """
         try:
             candidate = _unwrap(result)
@@ -535,7 +574,7 @@ class A2ATClientTransportDecorator:
 
         Mirrors a2a-java ``AbstractSSEEventListener.shouldAutoClose``: a final
         status update or a terminal Task snapshot ends the stream. A Message in
-        the stream does NOT terminate consumption — non-task single-response
+        the stream does NOT terminate consumption 鈥?non-task single-response
         flows end when the server closes the stream.
         """
         try:
@@ -595,7 +634,7 @@ class A2ATClientTransportDecorator:
         error: BaseException | None = None,
         final_event: Any = None,
     ) -> None:
-        """End the span (when present) and always record metrics + response log (§8.1)."""
+        """End the span (when present) and always record metrics + response log (搂8.1)."""
         try:
             if span is not None:
                 if error is not None:
@@ -642,7 +681,7 @@ class A2ATClientTransportDecorator:
         result: Any = None
         try:
             cm: Any = (
-                _otel_compat.use_span(entry_span, end_on_exit=False)
+                _use_entry_span_current(entry_span)
                 if entry_span is not None
                 else nullcontext()
             )
@@ -690,7 +729,7 @@ class A2ATClientTransportDecorator:
         stream = self._inner.send_message_streaming(request, context=context)
         try:
             cm: Any = (
-                _otel_compat.use_span(entry_span, end_on_exit=False)
+                _use_entry_span_current(entry_span)
                 if entry_span is not None
                 else nullcontext()
             )
@@ -739,7 +778,7 @@ class A2ATClientTransportDecorator:
         result: Any = None
         try:
             cm: Any = (
-                _otel_compat.use_span(entry_span, end_on_exit=False)
+                _use_entry_span_current(entry_span)
                 if entry_span is not None
                 else nullcontext()
             )
@@ -783,7 +822,7 @@ class A2ATClientTransportDecorator:
         error: BaseException | None = None
         try:
             cm: Any = (
-                _otel_compat.use_span(entry_span, end_on_exit=False)
+                _use_entry_span_current(entry_span)
                 if entry_span is not None
                 else nullcontext()
             )
@@ -821,3 +860,4 @@ class A2ATClientTransportDecorator:
 
     async def close(self) -> None:
         await self._inner.close()
+

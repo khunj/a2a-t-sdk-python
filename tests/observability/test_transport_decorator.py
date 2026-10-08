@@ -280,6 +280,61 @@ async def test_streaming_continues_after_negotiation_message_until_terminal(
     assert (event_spans[0].attributes or {})[ATTR_TASK_STATUS] == "completed"
 
 
+async def test_entry_span_context_restored_when_detach_fails(
+    exporter: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """生产实测（多轮协商）：a2a-sdk 跨上下文消费 SSE 使 OTel ``detach`` 失败且被吞
+    （"Token was created in a different Context"），上一轮 entry span 泄漏为 current，
+    下一轮 entry 串进同一条 trace。客户端 entry span 恒为 trace 根（显式
+    INVALID_SPAN_CONTEXT 隔离），ambient 污染（无论泄漏还是编排根遗留）都不影响；
+    跨请求关联走属性（negotiation.id，spec 6.3 模式 A）。
+    """
+    from opentelemetry.trace import use_span
+
+    first = A2ATClientTransportDecorator(FakeStreamingTransport([FakeMessage({}, task_id="T21", context_id="C21")]))
+    _ = [
+        event
+        async for event in first.send_message_streaming(
+            make_send_request({}, task_id="T21", context_id="C21"), context=FakeContext()
+        )
+    ]
+    first_entry = next(span for span in exporter.get_finished_spans() if span.name == "SendStreamingMessage")
+
+    import opentelemetry.context as otel_context
+
+    def flaky_detach(token: Any) -> None:
+        # 只让第一处 detach（本 SDK cm 的 finally）失败，模拟生产泄漏路径；
+        # 测试自身 use_span 的退出 detach 放行。
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("Token was created in a different Context")
+        real_detach(token)
+
+    real_detach = otel_context.detach
+    calls = {"n": 0}
+    monkeypatch.setattr(otel_context, "detach", flaky_detach)
+
+    # 模拟最恶劣环境：detach 必失败 + ambient 残留上一轮 entry span
+    with use_span(first_entry, end_on_exit=False):
+        second = A2ATClientTransportDecorator(
+            FakeStreamingTransport([FakeMessage({}, task_id="T22", context_id="C22")])
+        )
+        _ = [
+            event
+            async for event in second.send_message_streaming(
+                make_send_request({}, task_id="T22", context_id="C22"), context=FakeContext()
+            )
+        ]
+
+    second_entry = next(
+        span
+        for span in exporter.get_finished_spans()
+        if span.name == "SendStreamingMessage" and span.context.span_id != first_entry.context.span_id
+    )
+    assert second_entry.context.trace_id != first_entry.context.trace_id
+    assert second_entry.parent is None
+
+
 async def test_streaming_non_negotiation_message_sets_entry_attrs_only(exporter: InMemorySpanExporter) -> None:
     message = FakeMessage({_TASK_T_URI: "regular reply"}, task_id="T3", context_id="C3")
     inner = FakeStreamingTransport([message])

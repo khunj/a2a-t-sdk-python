@@ -23,6 +23,7 @@ __all__ = [
     "ENABLED_ENV_VAR",
     "INSTRUMENTING_MODULE_NAME",
     "INSTRUMENTING_MODULE_VERSION",
+    "INVALID_SPAN_CONTEXT",
     "NonRecordingSpan",
     "SpanKind",
     "StatusCode",
@@ -48,6 +49,7 @@ try:
     from opentelemetry import metrics as otel_metrics
     from opentelemetry import trace as otel_trace
     from opentelemetry.trace import (
+        INVALID_SPAN_CONTEXT,
         NonRecordingSpan,
         SpanKind,
         StatusCode,
@@ -174,9 +176,11 @@ def use_span(span: object, *, end_on_exit: bool = False) -> object:
 
 
 if not otel_installed:  # pragma: no cover - depends on environment
+    INVALID_SPAN_CONTEXT = None  # type: ignore[assignment]
     NonRecordingSpan = None  # type: ignore[assignment,misc]
     SpanKind = None  # type: ignore[assignment,misc]
     StatusCode = None  # type: ignore[assignment,misc]
     format_trace_id = None  # type: ignore[assignment]
     format_span_id = None  # type: ignore[assignment]
     otel_context = None  # type: ignore[assignment]
+
