@@ -58,17 +58,7 @@ async def run(scenario: str) -> None:
 
     metadata: dict[str, Any] = {_TASK_T: "sample-prompt-text"}
     prompt_text = "sample-prompt-text"
-    if scenario == "negotiation":
-        metadata = {
-            _NEGOTIATION_T: "propose the resource allocation for the slice",
-            "negotiationContext": {
-                "id": "N-sample",
-                "round": 3,
-                "maxRounds": 5,
-                "performative": "PROPOSE",
-            },
-        }
-    elif scenario == "a2at":
+    if scenario == "a2at":
         from obs_sample.mock_llm import install_mock_llm_if_needed
 
         install_mock_llm_if_needed(env_path=Path.cwd() / ".env")
@@ -87,9 +77,64 @@ async def run(scenario: str) -> None:
         print(f"[client] generated prompt ({len(prompt_text)} chars) via A2ATClient")
 
     if scenario == "negotiation":
-        # Metric demo: a2at.negotiation.total_rounds is auto-reported when the A2ATClient
-        # facade constructs a TERMINAL negotiation message (accept/reject/abort). The
-        # from-data accept path is deterministic (never calls an LLM), so no mock is needed.
+        # Real per-round timing (2026-09-30): negotiation rounds are BARE-Message
+        # exchanges — NO task is created before agreement. Each round: the client
+        # sends a Message, the server responds with a negotiation Message and
+        # disconnects (the stream ends). After agreement the task is started by a
+        # separate request (Task-T metadata) and runs its full lifecycle.
+        from google.protobuf.json_format import MessageToDict
+
+        conversation_id = str(uuid.uuid4())
+        rounds: list[tuple[str, dict[str, Any]]] = [
+            (
+                "round1-PROPOSE",
+                {
+                    _NEGOTIATION_T: "initial proposal: 松山湖区域资源配额 80%",
+                    "negotiationContext": {
+                        "id": "N-sample",
+                        "round": 1,
+                        "maxRounds": 5,
+                        "performative": "PROPOSE",
+                    },
+                },
+            ),
+            (
+                "round2-ACCEPT",
+                {
+                    _NEGOTIATION_T: "accept counter-offer: 松山湖区域资源配额 50% 生效",
+                    "negotiationContext": {
+                        "id": "N-sample",
+                        "round": 3,
+                        "maxRounds": 5,
+                        "performative": "ACCEPT",
+                    },
+                },
+            ),
+        ]
+        for label, round_metadata in rounds:
+            request = SendMessageRequest()
+            request.message.message_id = str(uuid.uuid4())
+            request.message.context_id = conversation_id
+            request.message.role = Role.ROLE_USER
+            request.message.parts.add().text = "observability-sample"
+            for key, value in round_metadata.items():
+                request.message.metadata[key] = value
+            round_context = ClientCallContext(service_parameters={"A2A-Extensions": _NEGOTIATION_T})
+            print(f"[client] {label}: sending")
+            async for response in client.send_message(request, context=round_context):
+                reply = MessageToDict(response.message)
+                reply_ctx = reply.get("metadata", {}).get("negotiationContext", {})
+                print(
+                    f"[client] {label}: reply performative={reply_ctx.get('performative')} "
+                    f"round={int(reply_ctx.get('round', 0))}"
+                )
+            # stream ends: the server disconnected after the negotiation Message
+        print("[client] negotiation agreed (2 rounds) — no task was created during rounds")
+
+        # Metric demo AFTER agreement: a2at.negotiation.total_rounds is auto-reported
+        # when the A2ATClient facade constructs a TERMINAL negotiation message
+        # (accept/reject/abort). The from-data accept path is deterministic (never
+        # calls an LLM), so no mock is needed.
         from a2a_t.client.a2at_client import A2ATClient
         from a2a_t.core.metadata import NegotiationContext, NegotiationPerformative
         from a2a_t.core.standard_templates import INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI
@@ -118,6 +163,23 @@ async def run(scenario: str) -> None:
         )
         facade.generate_negotiation_accept_prompt_from_data(data, INFORMATION_NEGOTIATION_ACCEPT_REJECT_URI)
         print("[client] reported a2at.negotiation.total_rounds=3 (outcome=accept) via A2ATClient")
+
+        # The task starts AFTER agreement: separate request, full task lifecycle.
+        task_request = SendMessageRequest()
+        task_request.message.message_id = str(uuid.uuid4())
+        task_request.message.context_id = conversation_id
+        task_request.message.role = Role.ROLE_USER
+        task_request.message.parts.add().text = "observability-sample"
+        task_request.message.metadata[_TASK_T] = _SAMPLE_INPUT
+        task_request.configuration.task_push_notification_config.id = "push-sample"
+        task_request.configuration.task_push_notification_config.url = f"http://127.0.0.1:{port}/push-sink"
+        task_context = ClientCallContext(service_parameters={"A2A-Extensions": _TASK_T})
+        print("[client] task-start: sending (task created only after agreement)")
+        async for response in client.send_message(task_request, context=task_context):
+            print(f"[client] task event: {type(response).__name__}")
+        await httpx_client.aclose()
+        print("[client] done — inspect the Langfuse traces (3: round1 / round2 / task)")
+        return
 
     request = SendMessageRequest()
     request.message.message_id = str(uuid.uuid4())
