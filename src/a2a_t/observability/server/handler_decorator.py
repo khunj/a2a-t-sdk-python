@@ -53,6 +53,9 @@ from a2a_t.observability.attributes import (
     ATTR_EXTENSION_NAME,
     ATTR_GEN_AI_CONVERSATION_ID,
     ATTR_GEN_AI_OPERATION_NAME,
+    ATTR_NEGOTIATION_ID,
+    ATTR_NEGOTIATION_PERFORMATIVE,
+    ATTR_NEGOTIATION_ROUND,
     ATTR_NOTIFICATION_TOPIC,
     ATTR_PUSH_NOTIFICATION_URL,
     ATTR_STREAMING_EVENT_KIND,
@@ -63,10 +66,14 @@ from a2a_t.observability.attributes import (
     DEFAULT_NOTIFICATION_TOPIC_REGEX,
     DEFAULT_TASK_TYPE_REGEX,
     EVENT_LOG_KINDS,
+    NEGOTIATION_EXTENSION,
+    NEGOTIATION_SUFFIX,
     EventInfo,
     classify_event,
     extension_name_from_uri,
+    extract_negotiation_attributes,
     extract_request_attributes,
+    is_negotiation_message,
     normalize_metadata,
     unwrap_stream_response,
 )
@@ -242,6 +249,45 @@ def _end_span_quietly(span: Any) -> None:
         logger.warning("a2at: failed to end span", exc_info=True)
 
 
+def _emit_negotiation_span(
+    operation_name: str,
+    kind: Any,
+    context: Any,
+    conversation_id: str | None,
+    info: EventInfo,
+) -> None:
+    """``*-negotiation`` span (v3 addendum): instant marker, PARENT via ``context``."""
+    try:
+        tracer: Any = _otel_compat.get_tracer()
+        span = tracer.start_span(f"{operation_name}{NEGOTIATION_SUFFIX}", kind=kind, context=context)
+        if span is None:
+            return
+        span.set_attribute(ATTR_GEN_AI_OPERATION_NAME, operation_name)
+        span.set_attribute(ATTR_EXTENSION_NAME, NEGOTIATION_EXTENSION)
+        if conversation_id:
+            span.set_attribute(ATTR_GEN_AI_CONVERSATION_ID, conversation_id)
+        if info.task_id:
+            span.set_attribute(ATTR_TASK_ID, info.task_id)
+        for key, value in extract_negotiation_attributes(info.message_metadata or {}).items():
+            span.set_attribute(key, value)
+        span.end()
+    except Exception:  # noqa: BLE001
+        logger.warning("a2at: failed to emit negotiation span", exc_info=True)
+
+
+def _log_negotiation(info: EventInfo, config: A2ATObservabilityConfig) -> None:
+    try:
+        metadata = info.message_metadata or {}
+        fields: dict[str, object] = {}
+        for key in (ATTR_NEGOTIATION_ID, ATTR_NEGOTIATION_ROUND, ATTR_NEGOTIATION_PERFORMATIVE):
+            value = extract_negotiation_attributes(metadata).get(key)
+            if value is not None:
+                fields[key] = value
+        log_event("negotiation.message", logging.DEBUG, fields=fields, config=config)
+    except Exception:  # noqa: BLE001
+        logger.debug("a2at: negotiation log failed", exc_info=True)
+
+
 class _ObservabilityEventQueue:
     """EventQueue wrapper: per-event INTERNAL span PARENT to the server entry span (spec 3.3/4.4)."""
 
@@ -270,6 +316,11 @@ class _ObservabilityEventQueue:
         info = self._classify(event)
         if info.task_id:
             _register_task_span_context(info.task_id, self._record)
+        if info.kind == "message" and is_negotiation_message(_unwrap(event)):
+            self._emit_negotiation_span(info)
+            self._log_negotiation(info)
+            await self._inner.enqueue_event(event)
+            return
         span = self._start_event_span(info)
         cm: Any = _safe_use_span(span)
         try:
@@ -322,6 +373,20 @@ class _ObservabilityEventQueue:
                 log_event("task.status_changed", logging.INFO, fields=fields, config=self._config)
         except Exception:  # noqa: BLE001
             logger.debug("a2at: stream event log failed", exc_info=True)
+
+    def _emit_negotiation_span(self, info: EventInfo) -> None:
+        if not self._span_active():
+            return
+        _emit_negotiation_span(
+            self._record.operation_name,
+            _otel_compat.SpanKind.SERVER,
+            self._record.otel_context,
+            self._record.conversation_id,
+            info,
+        )
+
+    def _log_negotiation(self, info: EventInfo) -> None:
+        _log_negotiation(info, self._config)
 
 
 class A2ATAgentExecutorDecorator:

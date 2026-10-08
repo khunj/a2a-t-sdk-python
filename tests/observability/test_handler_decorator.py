@@ -60,6 +60,7 @@ from tests.observability.stubs import (
 
 _EXTENSION_BASE = "https://projects.tmforum.org/a2aproject/telecommunication/extensions/"
 _TASK_T_URI = f"{_EXTENSION_BASE}Task-T"
+_NEGOTIATION_T_URI = f"{_EXTENSION_BASE}Negotiation-T"
 
 
 class FakeSimpleHandler:
@@ -798,3 +799,91 @@ async def test_legacy_handler_does_not_warn(caplog: pytest.LogCaptureFixture) ->
         A2ATRequestHandlerDecorator(inner)
 
     assert not [record for record in caplog.records if "LegacyRequestHandler" in record.getMessage()]
+
+
+async def test_stream_negotiation_message_creates_server_negotiation_span(
+    exporter: InMemorySpanExporter,
+) -> None:
+    metadata = {
+        _NEGOTIATION_T_URI: "counter-offer",
+        "negotiationContext": {"id": "N2", "round": 3, "maxRounds": 5, "performative": "ACCEPT"},
+    }
+    message = FakeMessage(metadata, task_id="T11", context_id="C11")
+    inner = FakeStreamingHandler(FakeExecutor(events=[message]))
+    decorator = A2ATRequestHandlerDecorator(inner)
+    params = make_send_request({}, task_id="T11", context_id="C11")
+
+    collected = [event async for event in decorator.on_message_send_stream(params, FakeServerCallContext())]
+
+    assert collected == [message]
+    spans = exporter.get_finished_spans()
+    assert sorted(span.name for span in spans) == ["SendStreamingMessage", "SendStreamingMessage-negotiation"]
+    entry = next(span for span in spans if span.name == "SendStreamingMessage")
+    negotiation = next(span for span in spans if span.name.endswith("-negotiation"))
+    assert negotiation.kind == SpanKind.SERVER
+    assert negotiation.parent is not None
+    assert negotiation.parent.span_id == entry.context.span_id
+    attrs = negotiation.attributes or {}
+    assert attrs[ATTR_EXTENSION_NAME] == "Negotiation-T"
+    assert attrs[ATTR_GEN_AI_OPERATION_NAME] == "SendStreamingMessage"
+    assert attrs[ATTR_GEN_AI_CONVERSATION_ID] == "C11"
+    assert attrs[ATTR_TASK_ID] == "T11"
+    assert attrs["gen_ai.agent.a2at.negotiation.id"] == "N2"
+    assert attrs["gen_ai.agent.a2at.negotiation.round"] == 3
+    assert attrs["gen_ai.agent.a2at.negotiation.performative"] == "ACCEPT"
+
+
+async def test_stream_negotiation_message_replaces_event_span(
+    exporter: InMemorySpanExporter,
+) -> None:
+    """D1 replace semantics: no SendStreamingMessage-event span for a negotiation Message."""
+    message = FakeMessage({_NEGOTIATION_T_URI: "offer"}, task_id="T12", context_id="C12")
+    inner = FakeStreamingHandler(FakeExecutor(events=[message]))
+    decorator = A2ATRequestHandlerDecorator(inner)
+
+    _ = [event async for event in decorator.on_message_send_stream(
+        make_send_request({}, task_id="T12", context_id="C12"), FakeServerCallContext()
+    )]
+
+    assert not [span for span in exporter.get_finished_spans() if span.name == "SendStreamingMessage-event"]
+
+
+async def test_stream_negotiation_log_fires_when_trace_off(
+    exporter: InMemorySpanExporter, caplog: pytest.LogCaptureFixture
+) -> None:
+    """§8.1: trace off → no span, negotiation.message log still fires."""
+    config = A2ATObservabilityConfig(trace_enabled=False)
+    message = FakeMessage(
+        {_NEGOTIATION_T_URI: "offer", "negotiationContext": {"id": "N3", "round": 1, "performative": "PROPOSE"}},
+        task_id="T13",
+        context_id="C13",
+    )
+    inner = FakeStreamingHandler(FakeExecutor(events=[message]))
+    decorator = A2ATRequestHandlerDecorator(inner, config=config)
+
+    with caplog.at_level(logging.DEBUG, logger="a2at.observability"):
+        _ = [event async for event in decorator.on_message_send_stream(
+            make_send_request({}, task_id="T13", context_id="C13"), FakeServerCallContext()
+        )]
+
+    assert not exporter.get_finished_spans()
+    assert any("negotiation.message" in record.getMessage() for record in caplog.records)
+
+
+async def test_stream_plain_message_still_gets_event_span(
+    exporter: InMemorySpanExporter,
+) -> None:
+    """非协商 message 仍走 -event span（D1 只替换协商 Message），kind=SERVER。"""
+    message = FakeMessage({_TASK_T_URI: "regular reply"}, task_id="T17", context_id="C17")
+    inner = FakeStreamingHandler(FakeExecutor(events=[message]))
+    decorator = A2ATRequestHandlerDecorator(inner)
+
+    _ = [event async for event in decorator.on_message_send_stream(
+        make_send_request({}, task_id="T17", context_id="C17"), FakeServerCallContext()
+    )]
+
+    spans = exporter.get_finished_spans()
+    event_spans = [span for span in spans if span.name == "SendStreamingMessage-event"]
+    assert len(event_spans) == 1
+    assert event_spans[0].kind == SpanKind.SERVER
+    assert (event_spans[0].attributes or {})[ATTR_STREAMING_EVENT_KIND] == "message"
