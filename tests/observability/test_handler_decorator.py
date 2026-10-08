@@ -887,3 +887,68 @@ async def test_stream_plain_message_still_gets_event_span(
     assert len(event_spans) == 1
     assert event_spans[0].kind == SpanKind.SERVER
     assert (event_spans[0].attributes or {})[ATTR_STREAMING_EVENT_KIND] == "message"
+
+
+async def test_sync_negotiation_message_creates_send_message_negotiation_span(
+    exporter: InMemorySpanExporter,
+) -> None:
+    metadata = {
+        _NEGOTIATION_T_URI: "final accept",
+        "negotiationContext": {"id": "N4", "round": 4, "maxRounds": 5, "performative": "ACCEPT"},
+    }
+    result = FakeMessage(metadata, task_id="T14", context_id="C14")
+    inner = FakeSyncQueueHandler(FakeExecutor(events=[result]), result=result)
+    decorator = A2ATRequestHandlerDecorator(inner)
+    params = make_send_request({_NEGOTIATION_T_URI: "propose"}, task_id="T14", context_id="C14")
+
+    returned = await decorator.on_message_send(params, FakeServerCallContext())
+
+    assert returned is result
+    spans = exporter.get_finished_spans()
+    assert sorted(span.name for span in spans) == ["SendMessage", "SendMessage-negotiation"]
+    entry = next(span for span in spans if span.name == "SendMessage")
+    negotiation = next(span for span in spans if span.name.endswith("-negotiation"))
+    assert negotiation.kind == SpanKind.SERVER
+    assert negotiation.parent is not None
+    assert negotiation.parent.span_id == entry.context.span_id
+    attrs = negotiation.attributes or {}
+    assert attrs[ATTR_EXTENSION_NAME] == "Negotiation-T"
+    assert attrs["gen_ai.agent.a2at.negotiation.performative"] == "ACCEPT"
+
+
+async def test_sync_negotiation_result_skips_entry_response_attrs(
+    exporter: InMemorySpanExporter,
+) -> None:
+    """Early-return mirror: negotiation attrs live on the negotiation span, not the entry span.
+
+    注：入口 span 的 ATTR_TASK_ID 来自 request 侧提取，不受 early-return 影响，故只断言
+    response 侧的 extension 不再写入。
+    """
+    metadata = {_NEGOTIATION_T_URI: "final accept"}
+    result = FakeMessage(metadata, task_id="T15", context_id="C15")
+    inner = FakeSyncQueueHandler(FakeExecutor(events=[result]), result=result)
+    decorator = A2ATRequestHandlerDecorator(inner)
+
+    await decorator.on_message_send(
+        make_send_request({}, task_id="T15", context_id="C15"), FakeServerCallContext()
+    )
+
+    entry = next(span for span in exporter.get_finished_spans() if span.name == "SendMessage")
+    attrs = entry.attributes or {}
+    assert ATTR_EXTENSION_NAME not in attrs
+
+
+async def test_stream_negotiation_final_event_no_double_span(
+    exporter: InMemorySpanExporter,
+) -> None:
+    """Streaming final == negotiation Message: EventQueue already emitted; _capture_response must not re-emit."""
+    message = FakeMessage({_NEGOTIATION_T_URI: "offer"}, task_id="T16", context_id="C16")
+    inner = FakeStreamingHandler(FakeExecutor(events=[message]))
+    decorator = A2ATRequestHandlerDecorator(inner)
+
+    _ = [event async for event in decorator.on_message_send_stream(
+        make_send_request({}, task_id="T16", context_id="C16"), FakeServerCallContext()
+    )]
+
+    spans = exporter.get_finished_spans()
+    assert len([span for span in spans if span.name.endswith("-negotiation")]) == 1

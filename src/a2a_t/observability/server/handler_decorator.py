@@ -375,6 +375,11 @@ class _ObservabilityEventQueue:
             logger.debug("a2at: stream event log failed", exc_info=True)
 
     def _emit_negotiation_span(self, info: EventInfo) -> None:
+        if self._record.operation_name != _SEND_STREAMING_MESSAGE:
+            # Sync SendMessage also routes through a queue (DefaultRequestHandler):
+            # its negotiation span is emitted by the entry-span finisher
+            # (_capture_response) — only the streaming operation emits here.
+            return
         if not self._span_active():
             return
         _emit_negotiation_span(
@@ -756,11 +761,26 @@ class A2ATRequestHandlerDecorator:
         except Exception:  # noqa: BLE001
             logger.warning("a2at: request payload capture failed", exc_info=True)
 
-    def _capture_response(self, span: Any, result: Any) -> None:
-        """Final-event attributes onto the entry span (spec 7.3 stream-end shapes)."""
+    def _capture_response(self, span: Any, result: Any, method: str = _SEND_MESSAGE) -> None:
+        """Final-event attributes onto the entry span (spec 7.3); sync negotiation span (v3 addendum)."""
         try:
-            info = classify_event(_unwrap(result))
+            candidate = _unwrap(result)
+            info = classify_event(candidate)
             if info.kind == "unknown":
+                return
+            if info.kind == "message" and is_negotiation_message(candidate):
+                conversation_id = _safe_getattr(candidate, "context_id")
+                if not isinstance(conversation_id, str) or not conversation_id:
+                    conversation_id = None
+                _log_negotiation(info, self._config)
+                if method == _SEND_MESSAGE and span is not None:
+                    _emit_negotiation_span(
+                        _SEND_MESSAGE,
+                        _otel_compat.SpanKind.SERVER,
+                        _context_with_span(span),
+                        conversation_id,
+                        info,
+                    )
                 return
             if info.task_id:
                 span.set_attribute(ATTR_TASK_ID, info.task_id)
@@ -833,7 +853,7 @@ class A2ATRequestHandlerDecorator:
         except Exception:  # noqa: BLE001
             logger.warning("a2at: failed to set entry span status", exc_info=True)
         if span is not None and final_event is not None:
-            self._capture_response(span, final_event)
+            self._capture_response(span, final_event, method=method)
         self._capture_response_payload(span, final_event)
         if span is not None:
             _end_span_quietly(span)
