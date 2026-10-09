@@ -340,9 +340,17 @@ class _ObservabilityEventQueue:
             return None
         try:
             tracer: Any = _otel_compat.get_tracer()
-            span = tracer.start_span(
-                _EVENT_SPAN_NAME, kind=_otel_compat.SpanKind.SERVER, context=self._record.otel_context
-            )
+            # D7: -event spans associate with the entry span via LINK (same
+            # trace, NO parent-child): long-running async tasks must be able to
+            # close and report the entry span without waiting for event spans.
+            orphan = _otel_compat.same_trace_orphan_context(self._record.span_context)
+            kwargs: dict[str, Any] = {
+                "kind": _otel_compat.SpanKind.SERVER,
+                "links": _links_for(self._record.span_context),
+            }
+            if orphan is not None:
+                kwargs["context"] = orphan
+            span = tracer.start_span(_EVENT_SPAN_NAME, **kwargs)
             if span is None:
                 return None
             span.set_attribute(ATTR_STREAMING_EVENT_KIND, info.kind)

@@ -10,6 +10,8 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import random
+from typing import Any
 
 logger = logging.getLogger("a2at.observability")
 
@@ -25,8 +27,10 @@ __all__ = [
     "INSTRUMENTING_MODULE_VERSION",
     "INVALID_SPAN_CONTEXT",
     "NonRecordingSpan",
+    "SpanContext",
     "SpanKind",
     "StatusCode",
+    "same_trace_orphan_context",
     "format_span_id",
     "format_trace_id",
     "get_current_span",
@@ -51,6 +55,7 @@ try:
     from opentelemetry.trace import (
         INVALID_SPAN_CONTEXT,
         NonRecordingSpan,
+        SpanContext,
         SpanKind,
         StatusCode,
         format_span_id,
@@ -175,9 +180,35 @@ def use_span(span: object, *, end_on_exit: bool = False) -> object:
     return _otel_use_span(span, end_on_exit=end_on_exit)  # type: ignore[arg-type]
 
 
+def same_trace_orphan_context(span_context: Any) -> Any | None:
+    """Build a context that starts the NEXT span in the SAME trace as
+    ``span_context`` but WITHOUT a parent-child relation (random parent span
+    id): the new span renders at trace top level, shares the trace id, and
+    closes independently of the entry span. Pair it with an explicit LINK to
+    the entry span for the association - long-running async tasks must be able
+    to close and report their entry span without waiting for event spans.
+    Returns None (caller falls back to the ambient) when OTel is absent or the
+    span context is invalid."""
+    if not otel_installed or span_context is None:
+        return None
+    if not getattr(span_context, "is_valid", False):
+        return None
+    from opentelemetry.trace import NonRecordingSpan, set_span_in_context
+
+    orphan = SpanContext(
+        trace_id=span_context.trace_id,
+        span_id=random.getrandbits(64),
+        is_remote=span_context.is_remote,
+        trace_flags=span_context.trace_flags,
+        trace_state=span_context.trace_state,
+    )
+    return set_span_in_context(NonRecordingSpan(orphan))
+
+
 if not otel_installed:  # pragma: no cover - depends on environment
     INVALID_SPAN_CONTEXT = None  # type: ignore[assignment]
     NonRecordingSpan = None  # type: ignore[assignment,misc]
+    SpanContext = None  # type: ignore[assignment,misc]
     SpanKind = None  # type: ignore[assignment,misc]
     StatusCode = None  # type: ignore[assignment,misc]
     format_trace_id = None  # type: ignore[assignment]

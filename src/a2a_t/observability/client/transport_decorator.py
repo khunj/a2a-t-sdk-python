@@ -516,14 +516,21 @@ class A2ATClientTransportDecorator:
         log_event("negotiation.message", logging.DEBUG, fields=fields, config=self._config)
 
     def _emit_event_link_span(self, entry_ctx: Any, info: EventInfo, conversation_id: str | None) -> None:
-        """``SendStreamingMessage-event`` span: LINK to the entry span (spec 3.2)."""
+        """``SendStreamingMessage-event`` span: same trace as the entry span,
+        LINK-associated (D7: no parent-child - in long-running async flows the
+        entry span must close independently of event spans)."""
         if entry_ctx is None:
             return
         try:
             tracer: Any = _otel_compat.get_tracer()
-            span = tracer.start_span(
-                _EVENT_SPAN_NAME, kind=_otel_compat.SpanKind.CLIENT, links=_links_for(entry_ctx)
-            )
+            orphan = _otel_compat.same_trace_orphan_context(entry_ctx)
+            kwargs: dict[str, Any] = {
+                "kind": _otel_compat.SpanKind.CLIENT,
+                "links": _links_for(entry_ctx),
+            }
+            if orphan is not None:
+                kwargs["context"] = orphan
+            span = tracer.start_span(_EVENT_SPAN_NAME, **kwargs)
             if span is None:
                 return
             span.set_attribute(ATTR_STREAMING_EVENT_KIND, info.kind)
@@ -534,7 +541,7 @@ class A2ATClientTransportDecorator:
             span.set_attribute(ATTR_GEN_AI_OPERATION_NAME, _SEND_STREAMING_MESSAGE)
             if conversation_id:
                 span.set_attribute(ATTR_GEN_AI_CONVERSATION_ID, conversation_id)
-                span.end()
+            span.end()
         except Exception:  # noqa: BLE001
             logger.warning("a2at: failed to emit stream event span", exc_info=True)
 
@@ -543,9 +550,14 @@ class A2ATClientTransportDecorator:
             return
         try:
             tracer: Any = _otel_compat.get_tracer()
-            span = tracer.start_span(
-                _ERROR_SPAN_NAME, kind=_otel_compat.SpanKind.CLIENT, links=_links_for(entry_ctx)
-            )
+            orphan = _otel_compat.same_trace_orphan_context(entry_ctx)
+            kwargs: dict[str, Any] = {
+                "kind": _otel_compat.SpanKind.CLIENT,
+                "links": _links_for(entry_ctx),
+            }
+            if orphan is not None:
+                kwargs["context"] = orphan
+            span = tracer.start_span(_ERROR_SPAN_NAME, **kwargs)
             if span is None:
                 return
             span.set_attribute("error.type", type(error).__name__)

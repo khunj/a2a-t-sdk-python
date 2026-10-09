@@ -406,7 +406,7 @@ async def test_e2e_trace_continuity_event_spans_and_metrics(otel_setup: tuple[An
     assert server_attrs["gen_ai.agent.a2at.task.id"]
     assert server_entry.status.status_code == StatusCode.OK
 
-    # (3) per-event spans on both ends: client LINK to the client entry, server PARENT of the server entry
+    # (3) per-event spans on both ends: LINK to their entry span, same trace, NO parent-child (D7)
     client_events = [
         span
         for span in spans
@@ -424,7 +424,12 @@ async def test_e2e_trace_continuity_event_spans_and_metrics(otel_setup: tuple[An
         span.links and link.context.span_id == client_entry.context.span_id for span in client_events for link in span.links
     )
     assert all(span.kind is SpanKind.SERVER for span in server_events)
-    assert all(span.parent is not None and span.parent.span_id == server_entry.context.span_id for span in server_events)
+    assert all(span.context.trace_id == server_entry.context.trace_id for span in server_events)
+    assert all(span.parent is None or span.parent.span_id != server_entry.context.span_id for span in server_events)
+    assert all(
+        span.links and any(link.context.span_id == server_entry.context.span_id for link in span.links)
+        for span in server_events
+    )
     assert {(span.attributes or {}).get("gen_ai.agent.a2at.streaming.event.kind") for span in server_events} == {
         "status",
         "artifact",

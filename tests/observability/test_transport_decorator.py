@@ -208,6 +208,9 @@ async def test_send_message_streaming_event_link_spans(exporter: InMemorySpanExp
     assert len(event_spans) == 3
     entry = next(span for span in spans if span.name == "SendStreamingMessage")
     for span in event_spans:
+        # D7: 同 trace、无父子、LINK 关联入口
+        assert span.context.trace_id == entry.context.trace_id
+        assert span.parent is None or span.parent.span_id != entry.context.span_id
         links = span.links or ()
         assert any(link.context.span_id == entry.context.span_id for link in links)
         attrs = span.attributes or {}

@@ -305,7 +305,7 @@ async def test_current_span_is_server_entry_inside_handler(exporter: InMemorySpa
     assert inner.observed_trace_id == format(parent_span_context.trace_id, "032x")
 
 
-async def test_stream_entry_and_per_event_parent_spans(exporter: InMemorySpanExporter) -> None:
+async def test_stream_entry_and_per_event_link_spans(exporter: InMemorySpanExporter) -> None:
     events = [
         make_status_event("T9", "TASK_STATE_WORKING"),
         FakeStreamResponse("artifact_update", make_artifact_event("T9")),
@@ -328,8 +328,12 @@ async def test_stream_entry_and_per_event_parent_spans(exporter: InMemorySpanExp
     assert len(event_spans) == 3
     for span in event_spans:
         assert span.kind == SpanKind.SERVER
-        assert span.parent is not None
-        assert span.parent.span_id == entry.context.span_id
+        # D7: -event 与入口同 trace 但无父子（LINK 关联）——长程异步任务中
+        # 入口 span 必须能独立关闭上报，不被事件 span 生命周期绑定
+        assert span.context.trace_id == entry.context.trace_id
+        assert span.parent is None or span.parent.span_id != entry.context.span_id
+        links = span.links or ()
+        assert any(link.context.span_id == entry.context.span_id for link in links)
         attrs = span.attributes or {}
         assert attrs[ATTR_GEN_AI_OPERATION_NAME] == "SendStreamingMessage"
         assert attrs[ATTR_GEN_AI_CONVERSATION_ID] == "C9"
@@ -577,8 +581,9 @@ async def test_two_concurrent_same_context_id_requests_no_stale_parent(exporter:
     assert all((span.attributes or {}).get(ATTR_TASK_ID) == "T-b" for span in event_spans)
     entry_b = next(span for span in entries if (span.attributes or {}).get(ATTR_A2A_CONTEXT_ID) == shared)
     for span in event_spans:
-        assert span.parent is not None
-        assert span.parent.span_id == entry_b.context.span_id
+        # D7: LINK 关联（无父子）——links 指向 B 的 entry（registry 未采纳 stale 的 A 记录）
+        assert span.links and any(link.context.span_id == entry_b.context.span_id for link in span.links)
+        assert span.parent is None or span.parent.span_id != entry_b.context.span_id
 
 
 async def test_push_dispatch_span_per_fanout_carries_push_info_url(exporter: InMemorySpanExporter) -> None:
