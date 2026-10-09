@@ -87,7 +87,7 @@ from a2a_t.observability.config import A2ATObservabilityConfig
 from a2a_t.observability.llm_stash import clear_llm_usage, get_llm_usage
 from a2a_t.observability.logs import log_event
 from a2a_t.observability.payload import extract_payload
-from a2a_t.observability.propagation import inject_traceparent
+from a2a_t.observability.propagation import extract_trace_context, inject_traceparent
 from a2a_t.observability.setup import ensure_otel_configured
 
 logger = logging.getLogger("a2at.observability")
@@ -288,19 +288,26 @@ class A2ATClientTransportDecorator:
             return None
         try:
             tracer: Any = _otel_compat.get_tracer()
-            # Client entry spans are ALWAYS trace roots: explicitly detach them
-            # from the ambient context. a2a-sdk consumes SSE streams across async
-            # contexts, where OTel's detach can fail silently (the exception is
-            # swallowed inside opentelemetry.context.detach), leaking the
-            # PREVIOUS request's entry span into the ambient - the multi-round
-            # negotiation flow then chained every request into one trace.
-            # Cross-request correlation is by attributes (negotiation.id /
-            # task.id, spec 6.3 mode A) or explicit inject_traceparent, never by
-            # ambient inheritance.
-            root_context = _otel_compat.otel_trace.set_span_in_context(
-                _otel_compat.NonRecordingSpan(_otel_compat.INVALID_SPAN_CONTEXT)
-            )
-            span = tracer.start_span(name, kind=_otel_compat.SpanKind.CLIENT, context=root_context)
+            # Client entry spans are trace ROOTs by default: a2a-sdk consumes SSE
+            # streams across async contexts where OTel's detach fails silently
+            # (the exception is swallowed inside opentelemetry.context.detach),
+            # leaking the PREVIOUS request's entry span into the ambient - the
+            # multi-round negotiation flow then chained every request into one
+            # trace by accident. Business-flow continuity is therefore EXPLICIT
+            # (spec 6.3 mode B): a caller propagates its business root by putting
+            # a ``traceparent`` entry into ``context.service_parameters``; it is
+            # extracted here as the entry span's parent, giving the whole
+            # negotiation + task flow one trace. Without it, entries stay roots
+            # and cross-request correlation is by attributes (negotiation.id /
+            # task.id, mode A).
+            caller_context = self._extract_caller_context(context)
+            if caller_context is not None:
+                span = tracer.start_span(name, kind=_otel_compat.SpanKind.CLIENT, context=caller_context)
+            else:
+                root_context = _otel_compat.otel_trace.set_span_in_context(
+                    _otel_compat.NonRecordingSpan(_otel_compat.INVALID_SPAN_CONTEXT)
+                )
+                span = tracer.start_span(name, kind=_otel_compat.SpanKind.CLIENT, context=root_context)
             if span is None:
                 return None
             self._set_request_attributes(span, request, name)
@@ -393,6 +400,17 @@ class A2ATClientTransportDecorator:
                     span.set_attribute(ATTR_AUTHORIZATION_POLICY_OPERATION_TYPE, operation_type)
         except Exception:  # noqa: BLE001 - spec 8.1: regex failure 鈫?DEBUG + omit
             logger.debug("a2at: regex attribute extraction failed", exc_info=True)
+
+    def _extract_caller_context(self, context: Any) -> Any | None:
+        """Caller-propagated business context (spec 6.3 mode B): a ``traceparent``
+        entry in ``context.service_parameters`` becomes the entry span's parent."""
+        try:
+            service_parameters = _safe_getattr(context, "service_parameters")
+            if not isinstance(service_parameters, MutableMapping):
+                return None
+            return extract_trace_context(service_parameters)
+        except Exception:  # noqa: BLE001 - extraction must never break the flow
+            return None
 
     def _inject_traceparent(self, context: Any, span: Any) -> None:
         try:

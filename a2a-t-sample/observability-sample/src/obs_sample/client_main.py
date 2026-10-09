@@ -82,6 +82,23 @@ async def run(scenario: str) -> None:
         # sends a Message, the server responds with a negotiation Message and
         # disconnects (the stream ends). After agreement the task is started by a
         # separate request (Task-T metadata) and runs its full lifecycle.
+        #
+        # Business-flow root (spec 6.3 mode B): one trace for the WHOLE flow. The
+        # root's traceparent is injected into every request's service_parameters;
+        # the client entry spans extract it as their parent (explicit, leak-free
+        # propagation — the rounds + task all land on one Langfuse trace).
+        from a2a_t.observability.propagation import inject_traceparent
+        from opentelemetry import trace as otel_trace
+
+        tracer = otel_trace.get_tracer("obs-sample")
+        root_span = tracer.start_span("negotiation-flow")
+        root_headers: dict[str, str] = {}
+        inject_traceparent(root_headers, context=otel_trace.set_span_in_context(root_span))
+
+        def flow_context(extension: str) -> ClientCallContext:
+            params: dict[str, str] = {"A2A-Extensions": extension, **root_headers}
+            return ClientCallContext(service_parameters=params)
+
         from google.protobuf.json_format import MessageToDict
 
         conversation_id = str(uuid.uuid4())
@@ -119,7 +136,7 @@ async def run(scenario: str) -> None:
             request.message.parts.add().text = "observability-sample"
             for key, value in round_metadata.items():
                 request.message.metadata[key] = value
-            round_context = ClientCallContext(service_parameters={"A2A-Extensions": _NEGOTIATION_T})
+            round_context = flow_context(_NEGOTIATION_T)
             print(f"[client] {label}: sending")
             async for response in client.send_message(request, context=round_context):
                 reply = MessageToDict(response.message)
@@ -173,12 +190,13 @@ async def run(scenario: str) -> None:
         task_request.message.metadata[_TASK_T] = _SAMPLE_INPUT
         task_request.configuration.task_push_notification_config.id = "push-sample"
         task_request.configuration.task_push_notification_config.url = f"http://127.0.0.1:{port}/push-sink"
-        task_context = ClientCallContext(service_parameters={"A2A-Extensions": _TASK_T})
+        task_context = flow_context(_TASK_T)
         print("[client] task-start: sending (task created only after agreement)")
         async for response in client.send_message(task_request, context=task_context):
             print(f"[client] task event: {type(response).__name__}")
+        root_span.end()
         await httpx_client.aclose()
-        print("[client] done — inspect the Langfuse traces (3: round1 / round2 / task)")
+        print("[client] done — ONE Langfuse trace covers rounds + task (negotiation-flow root)")
         return
 
     request = SendMessageRequest()

@@ -335,6 +335,38 @@ async def test_entry_span_context_restored_when_detach_fails(
     assert second_entry.parent is None
 
 
+async def test_entry_span_child_of_caller_traceparent(exporter: InMemorySpanExporter) -> None:
+    """显式传播（spec 6.3 模式 B）：调用方在 service_parameters 预置 traceparent →
+    entry span 成为该 span 的子 span（整个业务流程一条 trace，多轮协商 + 任务执行）；
+    未预置 → entry 恒为 ROOT（模式 A，防 a2a-sdk 跨上下文 detach 泄漏串链）。
+    """
+    from opentelemetry import trace as otel_trace
+
+    from a2a_t.observability.propagation import inject_traceparent
+
+    tracer = otel_trace.get_tracer("test")
+    root_span = tracer.start_span("business-root")
+
+    headers: dict[str, str] = {}
+    inject_traceparent(headers, context=otel_trace.set_span_in_context(root_span))
+    context = FakeContext()
+    context.service_parameters.update(headers)
+
+    decorator = A2ATClientTransportDecorator(FakeStreamingTransport([make_final_event("T23")]))
+    _ = [
+        event
+        async for event in decorator.send_message_streaming(
+            make_send_request({}, task_id="T23", context_id="C23"), context=context
+        )
+    ]
+    root_span.end()
+
+    entry = next(span for span in exporter.get_finished_spans() if span.name == "SendStreamingMessage")
+    assert entry.parent is not None
+    assert entry.parent.span_id == root_span.get_span_context().span_id
+    assert entry.context.trace_id == root_span.get_span_context().trace_id
+
+
 async def test_streaming_non_negotiation_message_sets_entry_attrs_only(exporter: InMemorySpanExporter) -> None:
     message = FakeMessage({_TASK_T_URI: "regular reply"}, task_id="T3", context_id="C3")
     inner = FakeStreamingTransport([message])
