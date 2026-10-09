@@ -49,6 +49,19 @@ def test_current_span_none_when_no_span() -> None:
     assert current_span() is None
 
 
+def test_current_span_none_when_current_span_already_ended(exporter: InMemorySpanExporter) -> None:
+    """泄漏场景防御（2026-09-30）：请求结束后 detach 失败使已结束的 entry span
+    残留为 current（OTel 吞掉 detach 异常）。已结束的 span 不是"活跃"span——
+    current_span() 必须返回 None，避免调用方拿到 stale 归因或向已结束 span
+    追加属性（静默丢弃）。"""
+    with trace.get_tracer("t").start_as_current_span("ended-request") as span:
+        pass
+    assert span.is_recording() is False
+    with trace.use_span(span, end_on_exit=False):
+        # 模拟泄漏：已结束的 span 仍为 current
+        assert current_span() is None
+
+
 def test_current_span_none_when_trace_signal_disabled(
     exporter: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
