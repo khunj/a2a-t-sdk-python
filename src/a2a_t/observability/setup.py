@@ -38,13 +38,25 @@ def is_otel_configured() -> bool:
     return _otel_configured
 
 
+def _normalize_protocol(raw: str | None) -> str:
+    """Lowercase, strip and alias-normalize the OTLP protocol; invalid → grpc (warned).
+
+    Shared by the env path (``get_protocol``) and the config path
+    (``_do_setup``): ``http`` is an alias for ``http/protobuf``; case and
+    surrounding whitespace are insignificant; anything else falls back to
+    ``grpc`` with a warning instead of silently dialing gRPC against an HTTP
+    port.
+    """
+    value = (raw or "grpc").strip().lower()
+    if value in ("grpc", "http/protobuf", "http"):
+        return "http/protobuf" if value.startswith("http") else "grpc"
+    logger.warning("Invalid A2AT exporter protocol %r; falling back to grpc", value)
+    return "grpc"
+
+
 def get_protocol() -> str:
     """Return the OTLP protocol ('grpc' or 'http/protobuf'); invalid values fall back to grpc."""
-    raw = os.getenv("A2AT_EXPORTER_PROTOCOL", "grpc").strip().lower()
-    if raw in ("grpc", "http/protobuf", "http"):
-        return "http/protobuf" if raw.startswith("http") else "grpc"
-    logger.warning("Invalid A2AT_EXPORTER_PROTOCOL=%r; falling back to grpc", raw)
-    return "grpc"
+    return _normalize_protocol(os.getenv("A2AT_EXPORTER_PROTOCOL", "grpc"))
 
 
 def ensure_otel_configured(config: A2ATObservabilityConfig | None = None) -> None:
@@ -94,7 +106,7 @@ def _do_setup(
         resolved_name = (
             service_name or os.getenv("OTEL_SERVICE_NAME") or os.getenv("A2AT_SERVICE_NAME") or "a2a-t-agent"
         )
-        resolved_protocol = protocol or get_protocol()
+        resolved_protocol = _normalize_protocol(protocol)
         resource = _build_resource(resolved_name)
         span_exporter, metric_exporter, log_exporter = _build_exporters(resolved_endpoint, resolved_protocol)
 

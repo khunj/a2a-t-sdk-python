@@ -35,11 +35,12 @@ but metrics and logs keep working.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import time
-from collections.abc import Mapping
-from contextlib import nullcontext
+from collections.abc import AsyncIterator, Mapping
+from contextlib import aclosing, nullcontext
 from typing import Any
 
 from a2a_t.observability import _otel_compat
@@ -82,7 +83,7 @@ from a2a_t.observability.attributes import (
 )
 from a2a_t.observability.config import A2ATObservabilityConfig
 from a2a_t.observability.logs import log_event
-from a2a_t.observability.payload import extract_payload
+from a2a_t.observability.payload import extract_payload, prepare_payload
 from a2a_t.observability.propagation import extract_trace_context
 from a2a_t.observability.setup import ensure_otel_configured
 
@@ -120,14 +121,15 @@ def _safe_getattr(obj: Any, name: str) -> Any:
 
 
 def _safe_use_span(span: Any) -> Any:
-    """Activation context manager; ``nullcontext`` for absent spans / activation failure."""
-    if span is None:
-        return nullcontext()
-    try:
-        return _otel_compat.use_span(span, end_on_exit=False)
-    except Exception:  # noqa: BLE001 - activation failure must not break the flow
-        logger.warning("a2at: span activation failed", exc_info=True)
-        return nullcontext()
+    """Leak-proof span activation (client ``_use_entry_span_current`` parity, D5).
+
+    Delegates to ``_otel_compat.use_span_leakproof``: snapshot the ambient
+    context before attaching and force-restore it when OTel's ``detach``
+    fails across async contexts - a2a-sdk consumes SSE streams from varying
+    execution contexts and the failure is swallowed inside OTel (only a log
+    line), which would otherwise leak the entry span as ambient current.
+    """
+    return _otel_compat.use_span_leakproof(span)
 
 
 def _span_is_recording(span: Any) -> bool:
@@ -758,7 +760,7 @@ class A2ATRequestHandlerDecorator:
             if payload is None:
                 return
             if span is not None:
-                span.set_attribute(ATTR_A2A_REQUEST, payload)
+                span.set_attribute(ATTR_A2A_REQUEST, prepare_payload(payload, self._config))
             attrs = extract_request_attributes(params, method=_SEND_MESSAGE)
             fields: dict[str, object] = {}
             if ATTR_TASK_ID in attrs:
@@ -824,7 +826,7 @@ class A2ATRequestHandlerDecorator:
             if payload is None:
                 return
             if span is not None:
-                span.set_attribute(ATTR_A2A_RESPONSE, payload)
+                span.set_attribute(ATTR_A2A_RESPONSE, prepare_payload(payload, self._config))
             info = classify_event(_unwrap(final_event))
             fields: dict[str, object] = {"task.id": info.task_id} if info.task_id else {}
             log_event(
@@ -840,7 +842,9 @@ class A2ATRequestHandlerDecorator:
     def _record_task_duration_metric(self, method: str, started: float) -> None:
         """``a2at.task.request.duration`` with server-side attribution (spec 5.5)."""
         try:
-            if not _otel_compat.is_metric_enabled():
+            # Dual gate (client parity): global env switch AND the instance-level
+            # config switch must both allow metrics.
+            if not _otel_compat.is_metric_enabled() or not self._config.metric_enabled:
                 return
             duration = time.perf_counter() - started
             attributes = {ATTR_GEN_AI_OPERATION_NAME: method, ATTR_SPAN_SIDE: "server"}
@@ -862,7 +866,19 @@ class A2ATRequestHandlerDecorator:
         """End the span (when present) and always record metrics + response log (§8.1)."""
         try:
             if span is not None:
-                if error is not None:
+                if isinstance(error, GeneratorExit):
+                    # Consumer-initiated abort (break + aclose) is a normal
+                    # shutdown path, not a business failure: keep the status
+                    # UNSET (neither OK nor ERROR) and record nothing - OTel
+                    # itself excludes BaseException from exception recording.
+                    pass
+                elif isinstance(error, asyncio.CancelledError):
+                    # Cancellation is not success either: ERROR + "cancelled"
+                    # keeps aborted requests out of success-rate statistics.
+                    status_error = getattr(_otel_compat.StatusCode, "ERROR", None)
+                    if status_error is not None:
+                        span.set_status(status_error, "cancelled")
+                elif error is not None:
                     span.record_exception(error)
                     status_error = getattr(_otel_compat.StatusCode, "ERROR", None)
                     if status_error is not None:
@@ -901,7 +917,7 @@ class A2ATRequestHandlerDecorator:
             with cm:
                 self._capture_request_payload(entry_span, params)
                 result = await self._inner.on_message_send(params, context)
-        except Exception as exc:  # noqa: BLE001 - business exception propagates
+        except BaseException as exc:  # noqa: BLE001 - business exception / cancellation propagates
             error = exc
             raise
         finally:
@@ -918,18 +934,24 @@ class A2ATRequestHandlerDecorator:
     # on_message_send_stream (async generator, spec 3.3)
     # ------------------------------------------------------------------
 
-    async def on_message_send_stream(self, params: Any, context: Any) -> Any:
-        call = self._run_stream(_SEND_STREAMING_MESSAGE, "on_message_send_stream", params, context, register=True)
-        async for event in call:
-            yield event
+    def on_message_send_stream(self, params: Any, context: Any) -> AsyncIterator[Any]:
+        # Plain delegation (no extra generator layer): consumer aclose()
+        # reaches _run_stream's finally directly, keeping span end + inner
+        # stream close deterministic on consumer abort (client parity).
+        return self._run_stream(
+            _SEND_STREAMING_MESSAGE, "on_message_send_stream", params, context, register=True
+        )
 
-    async def on_subscribe_to_task(self, params: Any, context: Any) -> Any:
+    def on_subscribe_to_task(self, params: Any, context: Any) -> AsyncIterator[Any]:
         # Re-attach to a running stream: entry span only — the tapped queue's events
         # are already observed by the producing request's EventQueue wrapper.
-        async for event in self._run_stream("SubscribeToTask", "on_subscribe_to_task", params, context, register=False):
-            yield event
+        return self._run_stream(
+            "SubscribeToTask", "on_subscribe_to_task", params, context, register=False
+        )
 
-    async def _run_stream(self, span_name: str, inner_method: str, params: Any, context: Any, *, register: bool) -> Any:
+    async def _run_stream(
+        self, span_name: str, inner_method: str, params: Any, context: Any, *, register: bool
+    ) -> AsyncIterator[Any]:
         if not self._decorator_active():
             async for event in getattr(self._inner, inner_method)(params, context):
                 yield event
@@ -949,10 +971,17 @@ class A2ATRequestHandlerDecorator:
             with cm:
                 if register:
                     self._capture_request_payload(entry_span, params)
-                async for event in getattr(self._inner, inner_method)(params, context):
-                    final_event = event
-                    yield event
-        except Exception as exc:  # noqa: BLE001 - business exception propagates
+                stream = getattr(self._inner, inner_method)(params, context)
+                # aclosing: the inner stream closes deterministically on ANY exit
+                # path - self-initiated break, business exception, AND consumer
+                # abort (GeneratorExit) - not just asyncgen GC finalization.
+                # Non-asyncgen streams (no ``aclose``) are consumed as-is.
+                stream_ctx = aclosing(stream) if hasattr(stream, "aclose") else nullcontext(stream)
+                async with stream_ctx:
+                    async for event in stream:
+                        final_event = event
+                        yield event
+        except BaseException as exc:  # noqa: BLE001 - business exception / cancellation propagates
             error = exc
             raise
         finally:
@@ -984,7 +1013,7 @@ class A2ATRequestHandlerDecorator:
             cm: Any = _safe_use_span(entry_span)
             with cm:
                 result = await inner_call(params, context)
-        except Exception as exc:  # noqa: BLE001 - business exception propagates
+        except BaseException as exc:  # noqa: BLE001 - business exception / cancellation propagates
             error = exc
             raise
         finally:

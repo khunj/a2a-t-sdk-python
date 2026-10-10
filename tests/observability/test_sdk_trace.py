@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Iterator
 from typing import Any
@@ -91,3 +92,25 @@ def test_methods_filter_and_original_preserved(exporter: InMemorySpanExporter) -
     assert facade.generate_task_prompt.__name__ == "generate_task_prompt"  # functools.wraps
     # 类未被修改（实例级包装）
     assert "_SyncFacade_wrapped" not in str(type(facade))
+
+
+async def test_wraps_asyncgen_methods_span_covers_iteration(exporter: InMemorySpanExporter) -> None:
+    """M6: async generator 方法（流式 facade 的高概率形态）的 span 必须覆盖整个迭代——
+    inspect.iscoroutinefunction 对 asyncgen 函数返回 False，旧逻辑落入 sync 包装：
+    调用只创建生成器对象，span 在任何迭代发生前就瞬时结束且无任何报错。"""
+    gate = asyncio.Event()
+
+    class StreamFacade:
+        async def stream(self) -> Any:
+            yield "a"
+            await gate.wait()
+            yield "b"
+
+    facade = trace_facade(StreamFacade())
+    gen = facade.stream()
+    assert await gen.__anext__() == "a"
+    # 迭代中途：span 仍在记录（尚未结束；get_finished_spans 返回 tuple）
+    assert not exporter.get_finished_spans()
+    gate.set()
+    assert [item async for item in gen] == ["b"]
+    assert [span.name for span in exporter.get_finished_spans()] == ["a2at.sdk.custom.stream"]

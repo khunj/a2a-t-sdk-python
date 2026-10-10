@@ -34,11 +34,12 @@ the stash when creating entry spans; the LLM client decorator sets it.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import time
-from collections.abc import AsyncIterator, Iterator, MutableMapping
-from contextlib import aclosing, contextmanager, nullcontext
+from collections.abc import AsyncIterator, MutableMapping
+from contextlib import aclosing, nullcontext
 from typing import Any
 
 from a2a_t.observability import _otel_compat
@@ -87,7 +88,7 @@ from a2a_t.observability.attributes import (
 from a2a_t.observability.config import A2ATObservabilityConfig
 from a2a_t.observability.llm_stash import clear_llm_usage, get_llm_usage
 from a2a_t.observability.logs import log_event
-from a2a_t.observability.payload import extract_payload
+from a2a_t.observability.payload import extract_payload, prepare_payload
 from a2a_t.observability.propagation import extract_trace_context, inject_traceparent
 from a2a_t.observability.setup import ensure_otel_configured
 
@@ -137,31 +138,21 @@ def _extension_from_metadata(metadata: dict[str, Any]) -> str | None:
     return None
 
 
-@contextmanager
-def _use_entry_span_current(span: Any) -> Iterator[None]:
-    """Attach ``span`` as the current span, with a leak-proof restore (D5 follow-up).
+def _use_entry_span_current(span: Any) -> Any:
+    """Attach ``span`` as the current span, with a leak-proof restore (D5).
 
-    a2a-sdk consumes SSE streams across async contexts: OTel's ``detach`` can fail
-    ("Token was created in a different Context") and the exception is swallowed
-    inside ``opentelemetry.context.detach`` - which leaks the attached entry span
-    into the ambient context. Subsequent requests would then chain into the same
-    trace (observed in the multi-round negotiation sample). Snapshot the ambient
-    context before attaching and force-restore it when detach fails. Legitimate
-    ambient inheritance (e.g. an orchestrator ``A2ATSpan`` root, spec 6.3 mode B)
-    is preserved via the snapshot.
+    Delegates to ``_otel_compat.use_span_leakproof``: a2a-sdk consumes SSE
+    streams across async contexts, where OTel's ``detach`` fails ("Token was
+    created in a different Context") and swallows the error internally - the
+    attached entry span would leak into the ambient context and subsequent
+    requests would chain into the same trace (observed in the multi-round
+    negotiation sample). The shared helper snapshots the ambient context
+    before attaching and force-restores it whenever the span is still
+    current after ``detach``. Legitimate ambient inheritance (e.g. an
+    orchestrator ``A2ATSpan`` root, spec 6.3 mode B) is preserved via the
+    snapshot.
     """
-    if not _otel_compat.is_enabled():
-        return
-    previous = _otel_compat.otel_context.get_current()
-    token = _otel_compat.otel_context.attach(_otel_compat.otel_trace.set_span_in_context(span))
-    try:
-        yield
-    finally:
-        try:
-            _otel_compat.otel_context.detach(token)
-        except Exception:  # noqa: BLE001 - OTel swallows too; restore explicitly
-            logger.warning("a2at: entry span context detach failed; restoring ambient snapshot")
-            _otel_compat.otel_context.attach(previous)
+    return _otel_compat.use_span_leakproof(span)
 
 
 def _unwrap(event: Any) -> Any:
@@ -444,7 +435,7 @@ class A2ATClientTransportDecorator:
             if payload is None:
                 return
             if span is not None:
-                span.set_attribute(ATTR_A2A_REQUEST, payload)
+                span.set_attribute(ATTR_A2A_REQUEST, prepare_payload(payload, self._config))
             attrs = extract_request_attributes(request, method=_SEND_MESSAGE)
             fields: dict[str, object] = {}
             if ATTR_TASK_ID in attrs:
@@ -634,7 +625,7 @@ class A2ATClientTransportDecorator:
             if payload is None:
                 return
             if span is not None:
-                span.set_attribute(ATTR_A2A_RESPONSE, payload)
+                span.set_attribute(ATTR_A2A_RESPONSE, prepare_payload(payload, self._config))
             info = classify_event(_unwrap(final_event))
             fields: dict[str, object] = {"task.id": info.task_id} if info.task_id else {}
             log_event(
@@ -650,7 +641,9 @@ class A2ATClientTransportDecorator:
     def _record_operation_metrics(self, method: str, started: float) -> None:
         """L1 + L3 duration histograms with client-side attribution (spec 5.5)."""
         try:
-            if not _otel_compat.is_metric_enabled():
+            # Dual gate (trace/log parity): global env switch AND the instance-level
+            # config switch must both allow metrics.
+            if not _otel_compat.is_metric_enabled() or not self._config.metric_enabled:
                 return
             duration = time.perf_counter() - started
             attributes = {ATTR_GEN_AI_OPERATION_NAME: method}
@@ -682,7 +675,19 @@ class A2ATClientTransportDecorator:
         """End the span (when present) and always record metrics + response log (鎼?.1)."""
         try:
             if span is not None:
-                if error is not None:
+                if isinstance(error, GeneratorExit):
+                    # Consumer-initiated abort (break + aclose) is a normal
+                    # shutdown path, not a business failure: keep the status
+                    # UNSET (neither OK nor ERROR) and record nothing - OTel
+                    # itself excludes BaseException from exception recording.
+                    pass
+                elif isinstance(error, asyncio.CancelledError):
+                    # Cancellation is not success either: ERROR + "cancelled"
+                    # keeps aborted requests out of success-rate statistics.
+                    status_error = getattr(_otel_compat.StatusCode, "ERROR", None)
+                    if status_error is not None:
+                        span.set_status(status_error, "cancelled")
+                elif error is not None:
                     span.record_exception(error)
                     status_error = getattr(_otel_compat.StatusCode, "ERROR", None)
                     if status_error is not None:
@@ -728,7 +733,7 @@ class A2ATClientTransportDecorator:
                 # Ungated (spec 8.1): _capture_response logs the negotiation
                 # message even when the entry span is absent (trace off).
                 self._capture_response(entry_span, result, _SEND_MESSAGE)
-        except Exception as exc:  # noqa: BLE001 - business exception propagates
+        except BaseException as exc:  # noqa: BLE001 - business exception / cancellation propagates
             error = exc
             raise
         finally:
@@ -785,9 +790,11 @@ class A2ATClientTransportDecorator:
                         yield event
                         if self._is_stream_end(event):
                             break
-        except Exception as exc:  # noqa: BLE001 - business exception propagates
+        except BaseException as exc:  # noqa: BLE001 - business exception / cancellation propagates
             error = exc
-            self._emit_error_span(entry_ctx, exc)
+            if not isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
+                # Cancel/abort is not a stream error: no -error span noise.
+                self._emit_error_span(entry_ctx, exc)
             raise
         finally:
             self._finish_entry_span(
@@ -822,7 +829,7 @@ class A2ATClientTransportDecorator:
             )
             with cm:
                 result = await inner_call(request, context=context)
-        except Exception as exc:  # noqa: BLE001 - business exception propagates
+        except BaseException as exc:  # noqa: BLE001 - business exception / cancellation propagates
             error = exc
             raise
         finally:
@@ -867,7 +874,7 @@ class A2ATClientTransportDecorator:
             with cm:
                 async for event in self._inner.subscribe(request, context=context):
                     yield event
-        except Exception as exc:  # noqa: BLE001 - business exception propagates
+        except BaseException as exc:  # noqa: BLE001 - business exception / cancellation propagates
             error = exc
             raise
         finally:

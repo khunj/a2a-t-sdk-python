@@ -9,10 +9,9 @@ from typing import Any
 
 from a2a_t.observability import _otel_compat
 from a2a_t.observability.config import A2ATObservabilityConfig
+from a2a_t.observability.payload import prepare_payload
 
 logger = logging.getLogger("a2at.observability")
-
-_TRUNCATED_SUFFIX = "[truncated]"
 
 
 def _current_trace_fields() -> dict[str, str]:
@@ -31,16 +30,9 @@ def _current_trace_fields() -> dict[str, str]:
 def _prepare_payload(payload: str, config: A2ATObservabilityConfig) -> str | None:
     if not config.resolved_payload_log_enabled:
         return None
-    text = payload
-    if config.payload_redactor is not None:
-        try:
-            text = config.payload_redactor(text)
-        except Exception:  # noqa: BLE001
-            text = "[redaction-failed]"
-    max_length = config.resolved_payload_log_max_length
-    if len(text) > max_length:
-        text = text[:max_length] + _TRUNCATED_SUFFIX
-    return text
+    # Shared single-stage preparation (redact → truncate, security order) so the
+    # log channel and the span-attribute channel apply identical semantics.
+    return prepare_payload(payload, config)
 
 
 def log_event(

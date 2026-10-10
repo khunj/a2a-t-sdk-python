@@ -68,14 +68,6 @@ def test_non_protobuf_falls_back_to_raw() -> None:
     assert json.loads(payload) == {"raw": "plain-event"}
 
 
-def test_truncation_appends_suffix() -> None:
-    from a2a_t.observability.payload import extract_payload
-
-    config = _config(extract_request=True, payload_log_max_length=10)
-    payload = extract_payload("0123456789abcdef", config, is_request=True)
-    assert payload == '{"raw": "0' + "[truncated]"
-
-
 def test_truncation_not_applied_within_limit() -> None:
     from a2a_t.observability.payload import extract_payload
 
@@ -85,25 +77,55 @@ def test_truncation_not_applied_within_limit() -> None:
     assert "[truncated]" not in payload
 
 
-def test_redactor_applied() -> None:
+def test_extract_returns_raw_serialization_only() -> None:
+    """M3: extract_payload 只负责序列化——截断与脱敏统一收敛到 prepare_payload
+    （每通道一次、先脱敏后截断），跨截断边界的 secret 不再因先截断而逃逸脱敏。"""
     from a2a_t.observability.payload import extract_payload
 
-    config = _config(extract_request=True, payload_redactor=lambda s: s.replace("secret", "***"))
-    payload = extract_payload({"raw": "has-secret-inside"}, config, is_request=True)
-    assert payload is not None
-    assert "secret" not in payload
-    assert "***" in payload
+    config = _config(
+        extract_request=True,
+        payload_log_max_length=10,
+        payload_redactor=lambda s: s.replace("0", "X"),
+    )
+    payload = extract_payload("0123456789abcdef", config, is_request=True)
+    assert payload == '{"raw": "0123456789abcdef"}'
 
 
-def test_redactor_failure_yields_placeholder() -> None:
-    from a2a_t.observability.payload import extract_payload
+def test_prepare_payload_redacts_before_truncation() -> None:
+    """M3 安全顺序：先脱敏后截断——截断只删字符不会暴露新内容；secret 跨越
+    max_length 边界被截成两半后，redactor 的完整模式无法命中，旧实现（先截断）
+    会让部分明文 secret 存活并进入日志/span 属性。"""
+    from a2a_t.observability.payload import prepare_payload
+
+    secret = "sk-abcdef0123456789"
+    config = _config(payload_log_max_length=25, payload_redactor=lambda s: s.replace(secret, "***"))
+    prepared = prepare_payload("x" * 18 + secret + "y" * 10, config)
+    assert "sk-a" not in prepared
+    assert prepared.endswith("[truncated]")
+
+
+def test_prepare_payload_truncation_appends_suffix() -> None:
+    from a2a_t.observability.payload import prepare_payload
+
+    config = _config(payload_log_max_length=10)
+    assert prepare_payload("0123456789abcdef", config) == "0123456789[truncated]"
+
+
+def test_prepare_payload_within_limit_redacted_only() -> None:
+    from a2a_t.observability.payload import prepare_payload
+
+    config = _config(payload_log_max_length=4096, payload_redactor=lambda s: s.replace("secret", "***"))
+    assert prepare_payload("has-secret-inside", config) == "has-***-inside"
+
+
+def test_prepare_payload_redactor_failure_yields_placeholder() -> None:
+    from a2a_t.observability.payload import prepare_payload
 
     def boom(_payload: str) -> str:
         raise RuntimeError("boom")
 
-    config = _config(extract_request=True, payload_redactor=boom)
-    payload = extract_payload("anything", config, is_request=True)
-    assert payload == "[redaction-failed]"
+    config = _config(payload_redactor=boom)
+    assert prepare_payload("anything", config) == "[redaction-failed]"
 
 
 def test_ensure_ascii_false_keeps_unicode() -> None:
@@ -124,17 +146,3 @@ def test_never_raises_on_failing_str() -> None:
 
     config = _config(extract_request=True)
     assert extract_payload(Exploding(), config, is_request=True) is None
-
-
-def test_truncation_before_redaction() -> None:
-    from a2a_t.observability.payload import extract_payload
-
-    seen: list[str] = []
-
-    def redactor(payload: str) -> str:
-        seen.append(payload)
-        return payload
-
-    config = _config(extract_request=True, payload_log_max_length=5, payload_redactor=redactor)
-    extract_payload("0123456789", config, is_request=True)
-    assert seen == ['{"raw[truncated]']

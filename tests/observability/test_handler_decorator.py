@@ -983,3 +983,136 @@ async def test_stream_negotiation_final_event_no_double_span(
 
     spans = exporter.get_finished_spans()
     assert len([span for span in spans if span.name.endswith("-negotiation")]) == 1
+
+
+class AbortTrackingStreamingHandler:
+    """FakeStreamingHandler-shaped stub whose stream generator tracks deterministic closure."""
+
+    def __init__(self, executor: Any) -> None:
+        self.agent_executor = executor
+        self._push_sender: Any = None
+        self.closed = False
+
+    async def on_message_send_stream(self, params: Any, context: Any) -> Any:
+        try:
+            queue = FakeEventQueue()
+            request_context = SimpleNamespace(
+                task_id=params.message.task_id,
+                context_id=params.message.context_id,
+                call_context=context,
+            )
+            await self.agent_executor.execute(request_context, queue)
+            for event in list(queue.events):
+                yield event
+        finally:
+            self.closed = True
+
+
+async def test_consumer_abort_closes_inner_stream_and_ends_entry_span(
+    exporter: InMemorySpanExporter,
+) -> None:
+    """消费者中途放弃流（break + aclose）时：内层 handler 流必须被确定性关闭（aclosing）、
+    entry span 必须确定性结束——都不能等 asyncgen GC 兜底（client 侧对称行为，SSE 断连
+    场景下长寿命 server 进程不得悬挂 span）。consumer abort 不是成功路径：状态保持 UNSET。"""
+    events = [make_status_event("T30", "TASK_STATE_WORKING"), make_final_event("T30")]
+    inner = AbortTrackingStreamingHandler(FakeExecutor(events=events))
+    decorator = A2ATRequestHandlerDecorator(inner)
+    params = make_send_request({}, task_id="T30", context_id="C30")
+
+    gen = decorator.on_message_send_stream(params, FakeServerCallContext())
+    received = 0
+    async for _event in gen:
+        received += 1
+        if received == 1:
+            break
+    assert received == 1
+    assert not inner.closed  # 消费者 break 本身不会立即关闭内层流
+    await gen.aclose()
+    assert inner.closed  # aclose 后内层流被确定性关闭（aclosing）
+    # entry span 已确定性结束（不等 GC），且 consumer abort 不记为 OK（M1）
+    entries = [span for span in exporter.get_finished_spans() if span.name == "SendStreamingMessage"]
+    assert len(entries) == 1
+    assert entries[0].status.status_code == StatusCode.UNSET
+
+
+async def test_cancelled_send_message_marks_span_error(exporter: InMemorySpanExporter) -> None:
+    """M1: asyncio.CancelledError 是 BaseException（不继承 Exception）——被取消的请求
+    不得记为 OK。entry span 必须标 ERROR + "cancelled"，异常照常向上传播。"""
+    inner = FakeSimpleHandler(error=asyncio.CancelledError())
+    decorator = A2ATRequestHandlerDecorator(inner)
+
+    with pytest.raises(asyncio.CancelledError):
+        await decorator.on_message_send(
+            make_send_request({}, task_id="T32", context_id="C32"), FakeServerCallContext()
+        )
+
+    entry = next(span for span in exporter.get_finished_spans() if span.name == "SendMessage")
+    assert entry.status.status_code == StatusCode.ERROR
+    assert entry.status.description == "cancelled"
+
+
+async def test_sync_business_error_marks_span_error(exporter: InMemorySpanExporter) -> None:
+    """M1 回归防护：普通业务异常（Exception）路径不受 BaseException 捕获改动影响——
+    record_exception + ERROR + 描述含异常信息，异常向上传播。"""
+    inner = FakeSimpleHandler(error=ValueError("boom"))
+    decorator = A2ATRequestHandlerDecorator(inner)
+
+    with pytest.raises(ValueError, match="boom"):
+        await decorator.on_message_send(
+            make_send_request({}, task_id="T33", context_id="C33"), FakeServerCallContext()
+        )
+
+    entry = next(span for span in exporter.get_finished_spans() if span.name == "SendMessage")
+    assert entry.status.status_code == StatusCode.ERROR
+    assert "boom" in (entry.status.description or "")
+    assert any(event.name == "exception" for event in entry.events)
+
+
+async def test_stream_activation_restores_ambient_when_detach_fails(
+    exporter: InMemorySpanExporter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """B3: 流式 span 激活跨 yield 挂起，消费者从不同执行上下文恢复时 OTel ``detach``
+    静默失败（"Token was created in a different Context" 被 opentelemetry.context.detach
+    内部吞掉，仅日志）——entry span 泄漏为 ambient current，后续无关工作串进被中止请求
+    的 trace。激活侧必须 snapshot ambient + detach 失败后 force-restore（client 侧
+    ``_use_entry_span_current`` 对称）。"""
+    import opentelemetry.context as otel_context
+
+    def silently_failing_detach(token: Any) -> None:
+        return None  # 模拟真实形态：detach 内部吞掉跨 Context token 错误
+
+    monkeypatch.setattr(otel_context, "detach", silently_failing_detach)
+
+    events = [make_status_event("T34", "TASK_STATE_WORKING"), make_final_event("T34")]
+    inner = FakeStreamingHandler(FakeExecutor(events=events))
+    decorator = A2ATRequestHandlerDecorator(inner)
+    params = make_send_request({}, task_id="T34", context_id="C34")
+
+    collected = [event async for event in decorator.on_message_send_stream(params, FakeServerCallContext())]
+    assert len(collected) == 2
+
+    # 请求结束后 ambient 必须恢复——current span 不得是泄漏的 entry/event span
+    current = _otel_compat.get_current_span()
+    assert not current.get_span_context().is_valid
+
+
+async def test_metric_config_disabled_records_no_metrics_but_spans(
+    exporter: InMemorySpanExporter, metric_reader: InMemoryMetricReader
+) -> None:
+    """M2: 实例级 A2ATObservabilityConfig(metric_enabled=False) 与全局 env 开关同等生效
+    （client 侧对称补齐——旧行为只查全局开关）；entry/event spans 照常。"""
+    config = A2ATObservabilityConfig(metric_enabled=False)
+    events = [make_status_event("T35", "TASK_STATE_WORKING"), make_final_event("T35")]
+    inner = FakeStreamingHandler(FakeExecutor(events=events))
+    decorator = A2ATRequestHandlerDecorator(inner, config=config)
+
+    collected = [
+        event
+        async for event in decorator.on_message_send_stream(
+            make_send_request({}, task_id="T35", context_id="C35"), FakeServerCallContext()
+        )
+    ]
+
+    assert len(collected) == 2
+    assert [span for span in exporter.get_finished_spans() if span.name == "SendStreamingMessage"]
+    assert _metric_names(metric_reader) == set()

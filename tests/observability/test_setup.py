@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 from collections.abc import Iterator
 
 import pytest
@@ -242,3 +243,62 @@ def test_resource_omits_agent_role_when_unset(monkeypatch) -> None:
     attrs = dict(setup_module._build_resource("svc").attributes)
 
     assert "agent.role" not in attrs
+
+
+# --------------------------------------------------------------------------------------
+# M5: config 路径的协议归一（别名/大小写/非法值不得静默走 gRPC）
+# --------------------------------------------------------------------------------------
+
+
+def test_config_protocol_alias_and_case_normalized(monkeypatch) -> None:
+    """M5: A2AT_EXPORTER_PROTOCOL=http（别名）/ HTTP（大写）经 config 路径必须归一为
+    http/protobuf——旧行为下 config 值恒非空使 get_protocol() 成为死代码，别名静默
+    走 gRPC（gRPC 拨 HTTP 端口只会得到难排查的连接错误）。"""
+    from a2a_t.observability.config import A2ATObservabilityConfig
+
+    setup_module = importlib.import_module("a2a_t.observability.setup")
+    calls: list[tuple[str, str]] = []
+
+    def fake_http(endpoint: str):
+        calls.append(("http", endpoint))
+        return None, None, None
+
+    def fake_grpc(endpoint: str):
+        calls.append(("grpc", endpoint))
+        return None, None, None
+
+    monkeypatch.setattr(setup_module, "_build_http_exporters", fake_http)
+    monkeypatch.setattr(setup_module, "_build_grpc_exporters", fake_grpc)
+
+    for raw in ("http", "HTTP", "Http/Protobuf", "http/protobuf"):
+        calls.clear()
+        setup_module._otel_configured = False
+        config = A2ATObservabilityConfig(endpoint="http://collector:4318", protocol=raw)
+        setup_module.ensure_otel_configured(config)
+        assert calls == [("http", "http://collector:4318")], raw
+
+
+def test_config_protocol_invalid_falls_back_to_grpc_with_warning(monkeypatch, caplog) -> None:
+    """M5: 非法协议值经 config 路径回退 grpc 并告警（不再静默）。"""
+    from a2a_t.observability.config import A2ATObservabilityConfig
+
+    setup_module = importlib.import_module("a2a_t.observability.setup")
+    calls: list[str] = []
+
+    def fake_http(endpoint: str):
+        calls.append("http")
+        return None, None, None
+
+    def fake_grpc(endpoint: str):
+        calls.append("grpc")
+        return None, None, None
+
+    monkeypatch.setattr(setup_module, "_build_http_exporters", fake_http)
+    monkeypatch.setattr(setup_module, "_build_grpc_exporters", fake_grpc)
+
+    with caplog.at_level(logging.WARNING, logger="a2at.observability"):
+        config = A2ATObservabilityConfig(endpoint="http://collector:4317", protocol="thrift")
+        setup_module.ensure_otel_configured(config)
+
+    assert calls == ["grpc"]
+    assert any("thrift" in record.message for record in caplog.records)

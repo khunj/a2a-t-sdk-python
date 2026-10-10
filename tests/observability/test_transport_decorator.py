@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Iterator
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from opentelemetry.trace import SpanKind, StatusCode
 
 from a2a_t.observability import _otel_compat
 from a2a_t.observability.attributes import (
+    ATTR_A2A_REQUEST,
     ATTR_AUTHORIZATION_POLICY_OPERATION_TYPE,
     ATTR_EXTENSION_NAME,
     ATTR_GEN_AI_CONVERSATION_ID,
@@ -401,6 +403,25 @@ async def test_consumer_abort_closes_inner_stream(exporter: InMemorySpanExporter
     assert not inner.closed  # 消费者 break 本身不会立即关闭内层流
     await gen.aclose()
     assert inner.closed  # aclose 后内层流被确定性关闭（aclosing）
+    # M1: consumer abort（GeneratorExit）不是成功路径——entry span 必须已结束
+    # 且状态保持 UNSET（不得记为 OK 污染成功率统计）。
+    entry = next(span for span in exporter.get_finished_spans() if span.name == "SendStreamingMessage")
+    assert entry.status.status_code == StatusCode.UNSET
+
+
+async def test_cancelled_send_message_marks_span_error(exporter: InMemorySpanExporter) -> None:
+    """M1: asyncio.CancelledError 是 BaseException（不继承 Exception）——被取消的请求
+    不得记为 OK。entry span 必须标 ERROR + "cancelled"，异常照常向上传播。"""
+    inner = FakeSyncTransport(error=asyncio.CancelledError())
+    decorator = A2ATClientTransportDecorator(inner)
+    request = make_send_request({}, task_id="T28", context_id="C28")
+
+    with pytest.raises(asyncio.CancelledError):
+        await decorator.send_message(request, context=FakeContext())
+
+    entry = next(span for span in exporter.get_finished_spans() if span.name == "SendMessage")
+    assert entry.status.status_code == StatusCode.ERROR
+    assert entry.status.description == "cancelled"
 
 
 async def test_entry_span_child_of_caller_traceparent(exporter: InMemorySpanExporter) -> None:
@@ -699,6 +720,47 @@ async def test_metric_disabled_records_no_metrics_but_spans(
     assert result is inner.result
     assert [span.name for span in exporter.get_finished_spans()] == ["SendMessage"]
     assert _metric_names(metric_reader) == set()
+
+
+async def test_metric_config_disabled_records_no_metrics_but_spans(
+    exporter: InMemorySpanExporter, metric_reader: InMemoryMetricReader
+) -> None:
+    """M2: 实例级 A2ATObservabilityConfig(metric_enabled=False) 与全局 env 开关同等生效
+    （对齐 trace/log 的双重检查——旧行为只查全局开关，实例开关形同虚设）；spans 照常。"""
+    config = A2ATObservabilityConfig(metric_enabled=False)
+    inner = FakeSyncTransport(result=_message_response())
+    decorator = A2ATClientTransportDecorator(inner, config=config)
+
+    result = await decorator.send_message(make_send_request({}, task_id="T23", context_id="C23"), context=FakeContext())
+
+    assert result is inner.result
+    assert [span.name for span in exporter.get_finished_spans()] == ["SendMessage"]
+    assert _metric_names(metric_reader) == set()
+
+
+async def test_span_payload_attribute_redacts_before_truncation(exporter: InMemorySpanExporter) -> None:
+    """M3: span 属性通道遵循“先脱敏后截断”——跨截断边界的 secret 不得以部分明文
+    进入 span 属性（旧实现先截断：secret 被切成两半后 redactor 完整模式无法命中）。"""
+    secret = "sk-abcdef0123456789"
+
+    class SecretRequest:
+        def __str__(self) -> str:
+            return "x" * 18 + secret + "y" * 10
+
+    config = A2ATObservabilityConfig(
+        extract_request=True,
+        payload_log_max_length=30,
+        payload_redactor=lambda s: s.replace(secret, "***"),
+    )
+    inner = FakeSyncTransport(result=_message_response())
+    decorator = A2ATClientTransportDecorator(inner, config=config)
+
+    await decorator.send_message(SecretRequest(), context=FakeContext())
+
+    entry = next(span for span in exporter.get_finished_spans() if span.name == "SendMessage")
+    attr = (entry.attributes or {})[ATTR_A2A_REQUEST]
+    assert "sk-" not in attr
+    assert attr.endswith("[truncated]")
 
 
 async def test_log_disabled_no_auto_logs_but_spans_and_metrics(

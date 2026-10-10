@@ -11,6 +11,7 @@ import contextlib
 import logging
 import os
 import random
+from collections.abc import Iterator
 from typing import Any
 
 logger = logging.getLogger("a2at.observability")
@@ -45,6 +46,7 @@ __all__ = [
     "otel_metrics",
     "otel_trace",
     "use_span",
+    "use_span_leakproof",
 ]
 
 otel_installed = False
@@ -178,6 +180,45 @@ def use_span(span: object, *, end_on_exit: bool = False) -> object:
     from opentelemetry.trace import use_span as _otel_use_span
 
     return _otel_use_span(span, end_on_exit=end_on_exit)  # type: ignore[arg-type]
+
+
+@contextlib.contextmanager
+def use_span_leakproof(span: Any) -> Iterator[None]:
+    """Attach ``span`` as the current span with a leak-proof restore.
+
+    a2a-sdk consumes SSE streams across async contexts: the async generator
+    that activated the span is resumed/closed from a different execution
+    context, where OTel's ``detach`` fails ("Token was created in a different
+    Context") and swallows the error internally (a log line only) - the span
+    stays attached to the ambient context and subsequent unrelated work
+    chains into the leaked span's trace. Snapshot the ambient context before
+    attaching; after ``detach``, verify the span is actually no longer
+    current and force-restore the snapshot otherwise (covers both the raising
+    and the silently-swallowed failure modes).
+    """
+    if span is None or not is_enabled():
+        yield
+        return
+    try:
+        previous = otel_context.get_current()
+        token = otel_context.attach(otel_trace.set_span_in_context(span))
+    except Exception:  # noqa: BLE001 - activation failure must not break the flow
+        logger.warning("a2at: span activation failed", exc_info=True)
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            otel_context.detach(token)
+        except Exception:  # noqa: BLE001 - restore explicitly
+            logger.warning("a2at: span context detach failed; restoring ambient snapshot")
+            otel_context.attach(previous)
+        else:
+            if get_current_span() is span:
+                # detach silently no-oped (OTel swallows cross-Context token
+                # errors internally): the span is still attached - repair.
+                otel_context.attach(previous)
 
 
 def same_trace_orphan_context(span_context: Any) -> Any | None:

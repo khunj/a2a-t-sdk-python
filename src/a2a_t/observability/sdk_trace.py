@@ -2,7 +2,10 @@
 
 Wraps public methods on the INSTANCE (setattr on the object, not the class) so neither the
 class definition nor the SDK source is modified. Coroutine functions get an async wrapper
-(the span ends only after await); sync functions a plain wrapper. Spans carry no custom
+(the span ends only after await); async generator functions get an asyncgen wrapper (the
+span covers the whole iteration — started on first ``__anext__``, ended on exhaustion or
+closure; ``inspect.iscoroutinefunction`` returns False for asyncgen functions, so they
+must be detected explicitly); sync functions a plain wrapper. Spans carry no custom
 attributes by design (spec §3.2). The master switch is honored via _otel_compat.get_tracer(),
 which degrades to a NoOp tracer when disabled.
 """
@@ -46,6 +49,17 @@ def _wrap_async(name: str, role: str, original: Any) -> Any:
     return wrapper
 
 
+def _wrap_asyncgen(name: str, role: str, original: Any) -> Any:
+    @functools.wraps(original)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        tracer: Any = _otel_compat.get_tracer()
+        with tracer.start_as_current_span(f"a2at.sdk.{role}.{name}"):
+            async for item in original(*args, **kwargs):
+                yield item
+
+    return wrapper
+
+
 def trace_facade(obj: Any, *, role: str | None = None, methods: Iterable[str] | None = None) -> Any:
     """Wrap public methods of obj with a2at.sdk.{role}.{method} INTERNAL spans; returns obj."""
     resolved_role = role or _guess_role(obj)
@@ -56,7 +70,9 @@ def trace_facade(obj: Any, *, role: str | None = None, methods: Iterable[str] | 
         names = list(methods)
     for name in names:
         original = getattr(obj, name)
-        if inspect.iscoroutinefunction(original):
+        if inspect.isasyncgenfunction(original):
+            setattr(obj, name, _wrap_asyncgen(name, resolved_role, original))
+        elif inspect.iscoroutinefunction(original):
             setattr(obj, name, _wrap_async(name, resolved_role, original))
         elif callable(original):
             setattr(obj, name, _wrap_sync(name, resolved_role, original))
