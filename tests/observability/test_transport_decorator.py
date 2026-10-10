@@ -363,6 +363,46 @@ async def test_entry_span_context_restored_when_detach_fails(
     assert second_entry.parent is None
 
 
+class AbortTrackingTransport:
+    """FakeStreamingTransport that records whether its stream generator was closed."""
+
+    def __init__(self, events: list[Any]) -> None:
+        self.events = events
+        self.closed = False
+
+    async def send_message_streaming(self, request: Any, *, context: Any = None) -> Any:
+        try:
+            for event in self.events:
+                yield event
+        finally:
+            self.closed = True
+
+    async def send_message(self, request: Any, *, context: Any = None) -> Any:
+        return self.events[-1] if self.events else None
+
+    def close(self) -> None:
+        pass
+
+
+async def test_consumer_abort_closes_inner_stream(exporter: InMemorySpanExporter) -> None:
+    """消费者中途放弃流（break + aclose）时，内层流必须被确定性关闭——
+    不能等 asyncgen GC 兜底（长程异步任务的资源纪律）。"""
+    inner = AbortTrackingTransport([make_status_event("T27", "TASK_STATE_WORKING"), make_final_event("T27")])
+    decorator = A2ATClientTransportDecorator(inner)
+    request = make_send_request({}, task_id="T27", context_id="C27")
+
+    gen = decorator.send_message_streaming(request, context=FakeContext())
+    received = 0
+    async for _event in gen:
+        received += 1
+        if received == 1:
+            break
+    assert received == 1
+    assert not inner.closed  # 消费者 break 本身不会立即关闭内层流
+    await gen.aclose()
+    assert inner.closed  # aclose 后内层流被确定性关闭（aclosing）
+
+
 async def test_entry_span_child_of_caller_traceparent(exporter: InMemorySpanExporter) -> None:
     """显式传播（spec 6.3 模式 B）：调用方在 service_parameters 预置 traceparent →
     entry span 成为该 span 的子 span（整个业务流程一条 trace，多轮协商 + 任务执行）；

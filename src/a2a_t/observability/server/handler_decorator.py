@@ -281,11 +281,12 @@ def _emit_negotiation_span(
 def _log_negotiation(info: EventInfo, config: A2ATObservabilityConfig) -> None:
     try:
         metadata = info.message_metadata or {}
-        fields: dict[str, object] = {}
-        for key in (ATTR_NEGOTIATION_ID, ATTR_NEGOTIATION_ROUND, ATTR_NEGOTIATION_PERFORMATIVE):
-            value = extract_negotiation_attributes(metadata).get(key)
-            if value is not None:
-                fields[key] = value
+        extracted = extract_negotiation_attributes(metadata)
+        fields: dict[str, object] = {
+            key: extracted[key]
+            for key in (ATTR_NEGOTIATION_ID, ATTR_NEGOTIATION_ROUND, ATTR_NEGOTIATION_PERFORMATIVE)
+            if extracted.get(key) is not None
+        }
         log_event("negotiation.message", logging.DEBUG, fields=fields, config=config)
     except Exception:  # noqa: BLE001
         logger.debug("a2at: negotiation log failed", exc_info=True)
@@ -317,10 +318,11 @@ class _ObservabilityEventQueue:
         return classify_event(_unwrap(event))
 
     async def enqueue_event(self, event: Any) -> None:
-        info = self._classify(event)
+        candidate = _unwrap(event)
+        info = self._classify(candidate)
         if info.task_id:
             _register_task_span_context(info.task_id, self._record)
-        if info.kind == "message" and is_negotiation_message(_unwrap(event)):
+        if info.kind == "message" and is_negotiation_message(candidate):
             self._emit_negotiation_span(info)
             self._log_negotiation(info)
             await self._inner.enqueue_event(event)
@@ -774,7 +776,13 @@ class A2ATRequestHandlerDecorator:
             logger.warning("a2at: request payload capture failed", exc_info=True)
 
     def _capture_response(self, span: Any, result: Any, method: str = _SEND_MESSAGE) -> None:
-        """Final-event attributes onto the entry span (spec 7.3); sync negotiation span (v3 addendum)."""
+        """Final-event attributes onto the entry span (spec 7.3); sync negotiation span (v3 addendum).
+
+        The ``negotiation.message`` log is NOT emitted here: the EventQueue hook
+        (``enqueue_event``) already logs every negotiation Message on this side
+        (all operations route through the wrapped queue), so logging here too
+        would double-fire.
+        """
         try:
             candidate = _unwrap(result)
             info = classify_event(candidate)
@@ -784,7 +792,6 @@ class A2ATRequestHandlerDecorator:
                 conversation_id = _safe_getattr(candidate, "context_id")
                 if not isinstance(conversation_id, str) or not conversation_id:
                     conversation_id = None
-                _log_negotiation(info, self._config)
                 if method == _SEND_MESSAGE and span is not None:
                     _emit_negotiation_span(
                         _SEND_MESSAGE,
@@ -793,6 +800,8 @@ class A2ATRequestHandlerDecorator:
                         conversation_id,
                         info,
                     )
+                return
+            if span is None:
                 return
             if info.task_id:
                 span.set_attribute(ATTR_TASK_ID, info.task_id)

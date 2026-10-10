@@ -15,9 +15,9 @@ Wraps every ``ClientTransport`` method with a2a-java-parity client spans:
 
 Everything is structural (no a2a import) and guarded: observability failures are
 swallowed with a WARNING on logger ``a2at.observability`` and never break the
-business flow. Signal semantics follow spec 搂8.1: the decorator is a full
+business flow. Signal semantics follow spec 鎼?.1: the decorator is a full
 pass-through only when OTel is unavailable or the master switch is off; with
-``A2AT_TRACE_ENABLED=false`` it stays active 鈥?no spans are produced, but
+``A2AT_TRACE_ENABLED=false`` it stays active 閳?no spans are produced, but
 metrics and logs keep working.
 
 Regex attributes (``task.type`` / ``notification.topic`` /
@@ -38,7 +38,7 @@ import dataclasses
 import logging
 import time
 from collections.abc import AsyncIterator, Iterator, MutableMapping
-from contextlib import contextmanager, nullcontext
+from contextlib import aclosing, contextmanager, nullcontext
 from typing import Any
 
 from a2a_t.observability import _otel_compat
@@ -262,7 +262,7 @@ class A2ATClientTransportDecorator:
     # ------------------------------------------------------------------
 
     def _decorator_active(self) -> bool:
-        """Master gate (spec 搂8.1): full pass-through only when OTel is unavailable/off.
+        """Master gate (spec 鎼?.1): full pass-through only when OTel is unavailable/off.
 
         Trace-off (``A2AT_TRACE_ENABLED=false``) is NOT a pass-through: the
         decorator stays active, skips span creation only, and metrics/logs keep
@@ -282,8 +282,8 @@ class A2ATClientTransportDecorator:
 
     def _start_entry_span(self, name: str, request: Any, context: Any) -> Any | None:
         if not _otel_compat.is_trace_enabled() or not self._config.trace_enabled:
-            # Spec 搂8.1: trace off 鈫?no span; metrics/logs stay active. The LLM
-            # stash is span-bound (channel 1) 鈥?drop it so it cannot leak into a
+            # Spec 鎼?.1: trace off 閳?no span; metrics/logs stay active. The LLM
+            # stash is span-bound (channel 1) 閳?drop it so it cannot leak into a
             # later request's entry span.
             clear_llm_usage()
             return None
@@ -399,7 +399,7 @@ class A2ATClientTransportDecorator:
                 operation_type = authorization.get(ATTR_AUTHORIZATION_POLICY_OPERATION_TYPE)
                 if operation_type:
                     span.set_attribute(ATTR_AUTHORIZATION_POLICY_OPERATION_TYPE, operation_type)
-        except Exception:  # noqa: BLE001 - spec 8.1: regex failure 鈫?DEBUG + omit
+        except Exception:  # noqa: BLE001 - spec 8.1: regex failure 閳?DEBUG + omit
             logger.debug("a2at: regex attribute extraction failed", exc_info=True)
 
     def _extract_caller_context(self, context: Any) -> Any | None:
@@ -465,7 +465,7 @@ class A2ATClientTransportDecorator:
         """Rule 3: response attributes onto the entry span / negotiation span (spec 3.1).
 
         Span-only work is skipped when ``entry_span`` is None (trace off), but the
-        negotiation log still fires (搂8.1: logs survive trace-off).
+        negotiation log still fires (鎼?.1: logs survive trace-off).
         """
         try:
             candidate = _unwrap(result)
@@ -519,11 +519,12 @@ class A2ATClientTransportDecorator:
 
     def _log_negotiation(self, info: EventInfo) -> None:
         metadata = info.message_metadata or {}
-        fields: dict[str, object] = {}
-        for key in (ATTR_NEGOTIATION_ID, ATTR_NEGOTIATION_ROUND, ATTR_NEGOTIATION_PERFORMATIVE):
-            value = extract_negotiation_attributes(metadata).get(key)
-            if value is not None:
-                fields[key] = value
+        extracted = extract_negotiation_attributes(metadata)
+        fields: dict[str, object] = {
+            key: extracted[key]
+            for key in (ATTR_NEGOTIATION_ID, ATTR_NEGOTIATION_ROUND, ATTR_NEGOTIATION_PERFORMATIVE)
+            if extracted.get(key) is not None
+        }
         log_event("negotiation.message", logging.DEBUG, fields=fields, config=self._config)
 
     def _emit_event_link_span(self, entry_ctx: Any, info: EventInfo, conversation_id: str | None) -> None:
@@ -615,7 +616,7 @@ class A2ATClientTransportDecorator:
 
         Mirrors a2a-java ``AbstractSSEEventListener.shouldAutoClose``: a final
         status update or a terminal Task snapshot ends the stream. A Message in
-        the stream does NOT terminate consumption 鈥?non-task single-response
+        the stream does NOT terminate consumption 閳?non-task single-response
         flows end when the server closes the stream.
         """
         try:
@@ -678,7 +679,7 @@ class A2ATClientTransportDecorator:
         error: BaseException | None = None,
         final_event: Any = None,
     ) -> None:
-        """End the span (when present) and always record metrics + response log (搂8.1)."""
+        """End the span (when present) and always record metrics + response log (鎼?.1)."""
         try:
             if span is not None:
                 if error is not None:
@@ -699,14 +700,6 @@ class A2ATClientTransportDecorator:
             except Exception:  # noqa: BLE001
                 logger.warning("a2at: failed to end entry span", exc_info=True)
         self._record_operation_metrics(method, started)
-
-    async def _aclose_quietly(self, stream: Any) -> None:
-        try:
-            aclose = getattr(stream, "aclose", None)
-            if callable(aclose):
-                await aclose()
-        except Exception:  # noqa: BLE001
-            logger.debug("a2at: inner stream aclose failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # send_message (sync request/response)
@@ -769,7 +762,6 @@ class A2ATClientTransportDecorator:
             conversation_id = None
         started = time.perf_counter()
         final_event: Any = None
-        broke_early = False
         error: BaseException | None = None
         stream = self._inner.send_message_streaming(request, context=context)
         try:
@@ -780,23 +772,24 @@ class A2ATClientTransportDecorator:
             )
             with cm:
                 self._capture_request_payload(entry_span, request)
-                async for event in stream:
-                    try:
-                        self._observe_stream_event(entry_span, entry_ctx, conversation_id, event)
-                        final_event = event
-                    except Exception:  # noqa: BLE001 - per-event observation is guarded
-                        logger.warning("a2at: streaming event observation failed", exc_info=True)
-                    yield event
-                    if self._is_stream_end(event):
-                        broke_early = True
-                        break
+                # aclosing: the inner stream closes deterministically on ANY exit
+                # path - self-initiated break, business exception, AND consumer
+                # abort (GeneratorExit), not just asyncgen GC finalization.
+                async with aclosing(stream):
+                    async for event in stream:
+                        try:
+                            self._observe_stream_event(entry_span, entry_ctx, conversation_id, event)
+                            final_event = event
+                        except Exception:  # noqa: BLE001 - per-event observation is guarded
+                            logger.warning("a2at: streaming event observation failed", exc_info=True)
+                        yield event
+                        if self._is_stream_end(event):
+                            break
         except Exception as exc:  # noqa: BLE001 - business exception propagates
             error = exc
             self._emit_error_span(entry_ctx, exc)
             raise
         finally:
-            if broke_early:
-                await self._aclose_quietly(stream)
             self._finish_entry_span(
                 entry_span,
                 _SEND_STREAMING_MESSAGE,
@@ -905,4 +898,5 @@ class A2ATClientTransportDecorator:
 
     async def close(self) -> None:
         await self._inner.close()
+
 

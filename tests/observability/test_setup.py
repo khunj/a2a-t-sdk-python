@@ -35,7 +35,24 @@ def _reset_otel_globals() -> Iterator[None]:
 
 
 def test_setup_creates_providers_with_console(monkeypatch) -> None:
+    import io
+
+    from opentelemetry.sdk._logs.export import ConsoleLogExporter
+    from opentelemetry.sdk.metrics.export import ConsoleMetricExporter
+    from opentelemetry.sdk.trace.export import ConsoleSpanExporter
+
     from a2a_t.observability.setup import is_otel_configured, setup
+
+    # Console exporters write to an in-memory sink instead of stdout: a REAL
+    # stdout-bound console provider flushes at interpreter shutdown when pytest's
+    # stdout is already closed ("ValueError: I/O operation on closed file" noise).
+    sink = io.StringIO()
+    setup_module = importlib.import_module("a2a_t.observability.setup")
+    monkeypatch.setattr(
+        setup_module,
+        "_build_console_exporters",
+        lambda: (ConsoleSpanExporter(out=sink), ConsoleMetricExporter(out=sink), ConsoleLogExporter(out=sink)),
+    )
 
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
     setup()
@@ -44,6 +61,21 @@ def test_setup_creates_providers_with_console(monkeypatch) -> None:
     from opentelemetry.sdk.trace import TracerProvider as SDKProvider
 
     assert isinstance(trace.get_tracer_provider(), SDKProvider)
+
+
+def test_setup_console_exporter_opt_out(monkeypatch) -> None:
+    """A2AT_CONSOLE_EXPORTER=false + no endpoint → signals stay NoOp (no stdout
+    console provider), setup still marks configured to avoid repeated attempts."""
+    from a2a_t.observability.setup import is_otel_configured, setup
+
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.setenv("A2AT_CONSOLE_EXPORTER", "false")
+    setup()
+    assert is_otel_configured() is True
+    # Provider NOT replaced: the ProxyTracerProvider remains (NoOp behavior)
+    from opentelemetry.trace import ProxyTracerProvider
+
+    assert isinstance(trace.get_tracer_provider(), ProxyTracerProvider)
 
 
 def test_setup_respects_existing_provider(monkeypatch) -> None:

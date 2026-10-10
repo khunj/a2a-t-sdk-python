@@ -33,7 +33,9 @@ Assertion coverage (spec §10.2 v3 table):
 5       -> test_e2e_negotiation_span
 6       -> test_e2e_sync_message_response_attributes_no_extra_spans
 7       -> test_e2e_push_notification_span
-9       -> test_e2e_payload_attributes_and_log_trace_context
+9       -> unit-level (trace-off degradation: test_config_enabled_false_full_pass_through,
+           test_trace_disabled_no_spans_but_metrics_and_logs, test_sync/stream_negotiation_log_fires_when_trace_off);
+           E2E covers the master-off regression only -> #10
 10      -> test_e2e_master_switch_off
 wiring  -> test_register_client_factory_decorates_real_factory_transport
 """

@@ -156,6 +156,13 @@ NEGOTIATION_EXTENSION = "Negotiation-T"
 NEGOTIATION_SUFFIX = "-negotiation"
 
 
+def _safe_getattr(obj: Any, name: str) -> Any:
+    try:
+        return getattr(obj, name)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def is_negotiation_message(message: Any) -> bool:
     """True when the message metadata carries the Negotiation-T extension key."""
     try:
@@ -171,13 +178,6 @@ def _extension_name_from_metadata(metadata: dict[str, Any]) -> str | None:
         if name:
             return name
     return None
-
-
-def _safe_getattr(obj: Any, name: str) -> Any:
-    try:
-        return getattr(obj, name)
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def extract_request_attributes(input_obj: Any, *, method: str) -> dict[str, AttributeValue]:

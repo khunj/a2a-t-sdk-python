@@ -19,12 +19,11 @@ import logging
 from typing import Any
 
 from a2a_t.observability import _otel_compat
-from a2a_t.observability.attributes import ATTR_EXTENSION_NAME, ATTR_NEGOTIATION_ID
+from a2a_t.observability.attributes import ATTR_EXTENSION_NAME, ATTR_NEGOTIATION_ID, NEGOTIATION_EXTENSION
 
 logger = logging.getLogger("a2at.observability")
 
 METRIC_NEGOTIATION_TOTAL_ROUNDS = "a2at.negotiation.total_rounds"
-NEGOTIATION_EXTENSION = "Negotiation-T"
 _OUTCOMES = frozenset({"accept", "reject", "abort"})
 
 _METRIC_INSTRUMENTS: dict[str, Any] = {}

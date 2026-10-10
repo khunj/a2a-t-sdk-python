@@ -99,19 +99,19 @@ def _do_setup(
         span_exporter, metric_exporter, log_exporter = _build_exporters(resolved_endpoint, resolved_protocol)
 
         # Step 3: Providers (per-signal)
-        if _otel_compat.is_trace_enabled():
+        if span_exporter is not None and _otel_compat.is_trace_enabled():
             tp = TracerProvider(resource=resource)
             tp.add_span_processor(_build_span_processor(span_exporter))
             trace_api.set_tracer_provider(tp)
 
-        if _otel_compat.is_metric_enabled():
+        if metric_exporter is not None and _otel_compat.is_metric_enabled():
             _setup_meter_provider(resource, metric_exporter)
 
-        if _otel_compat.is_log_enabled():
+        if log_exporter is not None and _otel_compat.is_log_enabled():
             _setup_logger_provider(resource, log_exporter)
 
         _otel_configured = True
-        if resolved_endpoint is None:
+        if resolved_endpoint is None and span_exporter is not None:
             logger.warning("No OTLP endpoint configured; using Console exporters (dev mode)")
     except Exception:
         logger.warning("OTel auto-config failed", exc_info=True)
@@ -166,8 +166,20 @@ def _build_grpc_exporters(endpoint: str) -> tuple[Any, Any, Any]:
     )
 
 
+def _console_exporter_enabled() -> bool:
+    """``A2AT_CONSOLE_EXPORTER`` (default true): the dev-mode Console fallback can
+    be turned off for production processes where stdout spam is undesirable."""
+    return os.getenv("A2AT_CONSOLE_EXPORTER", "true").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _build_exporters(endpoint: str | None, protocol: str) -> tuple[Any, Any, Any]:
     if endpoint is None:
+        if not _console_exporter_enabled():
+            logger.info(
+                "A2AT_CONSOLE_EXPORTER=false and no OTLP endpoint configured: "
+                "signals stay NoOp (no exporters installed)"
+            )
+            return None, None, None
         return _build_console_exporters()
 
     try:
@@ -175,6 +187,12 @@ def _build_exporters(endpoint: str | None, protocol: str) -> tuple[Any, Any, Any
             return _build_http_exporters(endpoint)
         return _build_grpc_exporters(endpoint)
     except ImportError:
+        if not _console_exporter_enabled():
+            logger.warning(
+                "OTLP %s exporter package unavailable and A2AT_CONSOLE_EXPORTER=false: signals stay NoOp",
+                protocol,
+            )
+            return None, None, None
         logger.warning(
             "OTLP %s exporter package unavailable; falling back to Console exporters (dev mode)",
             protocol,

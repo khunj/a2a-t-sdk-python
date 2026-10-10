@@ -148,6 +148,9 @@ class A2ATObservabilityConfig:
         )
         result = self._invoke("authorization_provider", provider, view)
         if isinstance(result, str):
-            cleaned = re.sub(r"（[^）]*）\s*$", "", result).strip()
+            # Convention: the operation type may carry a trailing parenthetical
+            # annotation (e.g. "query（必填）" / "query (required)") - strip any
+            # full-width OR ASCII trailing parenthetical before use.
+            cleaned = re.sub(r"[（(][^）)]*[）)]\s*$", "", result).strip()
             return {ATTR_AUTHORIZATION_POLICY_OPERATION_TYPE: cleaned} if cleaned else None
         return None
