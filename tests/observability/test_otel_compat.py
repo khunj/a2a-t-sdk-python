@@ -99,3 +99,30 @@ def test_use_span_helper(exporter_setup) -> None:
         assert trace.get_current_span() is span
     assert span.is_recording()  # end_on_exit=False → still recording
     span.end()
+
+
+def test_same_trace_orphan_context_shares_trace_without_parent(exporter_setup) -> None:
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+
+    trace.set_tracer_provider(TracerProvider())
+    entry = trace.get_tracer("t").start_span("entry")
+    entry_sc = entry.get_span_context()
+
+    orphan_ctx = _otel_compat.same_trace_orphan_context(entry_sc)
+    assert orphan_ctx is not None
+
+    child = trace.get_tracer("t").start_span("event", context=orphan_ctx)
+    child_sc = child.get_span_context()
+    # 同 trace、随机孤儿父（不指向 entry）、entry 可独立关闭
+    assert child_sc.trace_id == entry_sc.trace_id
+    assert child_sc.span_id != entry_sc.span_id
+    child.end()
+    entry.end()
+
+
+def test_same_trace_orphan_context_invalid_input_returns_none() -> None:
+    from opentelemetry import trace
+
+    assert _otel_compat.same_trace_orphan_context(None) is None
+    assert _otel_compat.same_trace_orphan_context(trace.INVALID_SPAN_CONTEXT) is None

@@ -466,7 +466,33 @@ async def test_trace_disabled_no_spans_but_metrics_and_logs(
     assert "a2at.task.request.duration" in names
     points = _histogram_point_attributes(metric_reader, "a2at.task.request.duration")
     assert points
+    assert all(p.get("a2at.span.side") == "server" for p in points)
     assert any("task.status_changed" in record.getMessage() for record in caplog.records)
+
+
+async def test_sync_negotiation_log_fires_when_trace_off(
+    exporter: InMemorySpanExporter, caplog: pytest.LogCaptureFixture
+) -> None:
+    """§8.1/§4.2：sync 路径 trace-off 时协商日志仍发（span 缺席不吞日志）。"""
+    config = A2ATObservabilityConfig(trace_enabled=False)
+    result = FakeMessage(
+        {
+            _NEGOTIATION_T_URI: "final accept",
+            "negotiationContext": {"id": "N9", "round": 3, "maxRounds": 5, "performative": "ACCEPT"},
+        },
+        task_id="T25",
+        context_id="C25",
+    )
+    inner = FakeSyncQueueHandler(FakeExecutor(events=[result]), result=result)
+    decorator = A2ATRequestHandlerDecorator(inner, config=config)
+
+    with caplog.at_level(logging.DEBUG, logger="a2at.observability"):
+        await decorator.on_message_send(
+            make_send_request({}, task_id="T25", context_id="C25"), FakeServerCallContext()
+        )
+
+    assert not exporter.get_finished_spans()
+    assert any("negotiation.message" in record.getMessage() for record in caplog.records)
 
 
 async def test_config_enabled_false_full_pass_through(

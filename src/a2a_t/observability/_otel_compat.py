@@ -197,7 +197,8 @@ def same_trace_orphan_context(span_context: Any) -> Any | None:
 
     orphan = SpanContext(
         trace_id=span_context.trace_id,
-        span_id=random.getrandbits(64),
+        # 0 is not a valid W3C span id - guard the astronomically unlikely draw.
+        span_id=random.getrandbits(64) or 1,
         is_remote=span_context.is_remote,
         trace_flags=span_context.trace_flags,
         trace_state=span_context.trace_state,

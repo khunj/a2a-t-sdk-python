@@ -64,6 +64,7 @@ from a2a_t.observability.attributes import (
     ATTR_NEGOTIATION_PERFORMATIVE,
     ATTR_NEGOTIATION_ROUND,
     ATTR_NOTIFICATION_TOPIC,
+    ATTR_SPAN_SIDE,
     ATTR_STREAMING_EVENT_KIND,
     ATTR_TASK_ID,
     ATTR_TASK_STATUS,
@@ -413,6 +414,16 @@ class A2ATClientTransportDecorator:
             return None
 
     def _inject_traceparent(self, context: Any, span: Any) -> None:
+        """Write the entry span's traceparent into ``context.service_parameters``
+        (the HTTP header carrier) so the SERVER entry span becomes its child.
+
+        NOTE: this MUTATES ``service_parameters`` - the caller-provided
+        ``traceparent`` (mode B business-root propagation, read at
+        ``_start_entry_span``) is OVERWRITTEN here with the entry span's own
+        context. Callers reusing one service_parameters dict across requests
+        therefore get the LAST request's context, not their business root -
+        rebuild the dict per request (as the sample does) for star topology.
+        """
         try:
             if not _otel_compat.is_enabled():
                 return
@@ -647,11 +658,14 @@ class A2ATClientTransportDecorator:
             )
             if gen_ai_histogram is not None:
                 gen_ai_histogram.record(duration, attributes=attributes)
+            # Side dimension separates the client/server populations of the
+            # dual-recorded a2at histogram (spans use SpanKind; metrics have no kind).
+            task_attributes = {**attributes, ATTR_SPAN_SIDE: "client"}
             task_histogram = _metric_histogram(
                 _METRIC_TASK_DURATION, "s", "A2A-T task request duration"
             )
             if task_histogram is not None:
-                task_histogram.record(duration, attributes=attributes)
+                task_histogram.record(duration, attributes=task_attributes)
         except Exception:  # noqa: BLE001
             logger.warning("a2at: failed to record client metrics", exc_info=True)
 
@@ -718,8 +732,9 @@ class A2ATClientTransportDecorator:
             with cm:
                 self._capture_request_payload(entry_span, request)
                 result = await self._inner.send_message(request, context=context)
-                if entry_span is not None:
-                    self._capture_response(entry_span, result, _SEND_MESSAGE)
+                # Ungated (spec 8.1): _capture_response logs the negotiation
+                # message even when the entry span is absent (trace off).
+                self._capture_response(entry_span, result, _SEND_MESSAGE)
         except Exception as exc:  # noqa: BLE001 - business exception propagates
             error = exc
             raise

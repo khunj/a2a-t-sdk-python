@@ -20,6 +20,10 @@ ATTR_NEGOTIATION_TOTAL_ROUNDS = "gen_ai.agent.a2at.negotiation.total_rounds"
 ATTR_NOTIFICATION_TOPIC = "gen_ai.agent.a2at.notification.topic"
 ATTR_STREAMING_EVENT_KIND = "gen_ai.agent.a2at.streaming.event.kind"
 ATTR_PUSH_NOTIFICATION_URL = "gen_ai.agent.a2at.push.notification.url"
+#: Metric dimension for dual-recorded histograms (``a2at.task.request.duration``
+#: is recorded on both ends): spans distinguish sides via SpanKind, metrics have
+#: no kind - this attribute separates the client/server populations (spec 3.4/5.5).
+ATTR_SPAN_SIDE = "a2at.span.side"
 ATTR_AUTHORIZATION_POLICY_OPERATION_TYPE = "gen_ai.agent.a2at.authorization.policy.operation.type"
 ATTR_AUTHORIZATION_POLICY_ID = "authorization.policy.id"
 ATTR_AUTHORIZATION_OPERATION_TYPE = "authorization.operation_type"

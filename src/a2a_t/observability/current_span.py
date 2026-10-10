@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from a2a_t.observability import _otel_compat
+
+logger = logging.getLogger("a2at.observability")
 
 
 class A2ATCurrentSpan:
@@ -17,7 +20,7 @@ class A2ATCurrentSpan:
         try:
             self._span.set_attribute(key, value)
         except Exception:
-            pass
+            logger.debug("a2at: failed to set attribute on current span", exc_info=True)
 
     @property
     def trace_id(self) -> str | None:

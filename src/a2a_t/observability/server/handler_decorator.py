@@ -7,10 +7,12 @@ Spans created (SERVER side, names per the a2a-java dashboard):
   ``context.state["headers"]`` (no ASGI middleware; a RequestContext-shaped
   ``context.call_context.state["headers"]`` is honoured as a fallback), ending
   when the method returns (sync) or when the stream ends (streaming, try/finally);
-- per-event INTERNAL spans ``SendStreamingMessage-event`` PARENT to the server
-  entry span. Mechanism (verified against a2a-python's DefaultRequestHandler):
+- per-event SERVER spans ``SendStreamingMessage-event`` in the SAME trace as the
+  entry span, associated via LINK (D7: no parent-child - long-running async
+  tasks must be able to close and report the entry span independently).
+  Mechanism (verified against a2a-python's DefaultRequestHandler):
   the handler creates its EventQueue internally and hands it to
-  ``agent_executor.execute(request_context, queue)`` — the decorator therefore
+  ``agent_executor.execute(request_context, queue)`` �� the decorator therefore
   wraps the inner handler's ``agent_executor`` attribute at ``__init__``
   (``A2ATAgentExecutorDecorator``), and the executor decorator wraps the queue;
 - push sender CLIENT spans ``SendMessage-pushNotification`` (the inner handler's
@@ -58,6 +60,7 @@ from a2a_t.observability.attributes import (
     ATTR_NEGOTIATION_ROUND,
     ATTR_NOTIFICATION_TOPIC,
     ATTR_PUSH_NOTIFICATION_URL,
+    ATTR_SPAN_SIDE,
     ATTR_STREAMING_EVENT_KIND,
     ATTR_TASK_ID,
     ATTR_TASK_STATUS,
@@ -289,7 +292,8 @@ def _log_negotiation(info: EventInfo, config: A2ATObservabilityConfig) -> None:
 
 
 class _ObservabilityEventQueue:
-    """EventQueue wrapper: per-event SERVER span PARENT to the server entry span (spec 3.3/4.4)."""
+    """EventQueue wrapper: per-event SERVER spans in the entry span's trace,
+    LINK-associated (D7: no parent-child, independent lifecycle)."""
 
     def __init__(self, inner: Any, record: _EntryRecord, config: A2ATObservabilityConfig) -> None:
         self._inner = inner
@@ -830,7 +834,7 @@ class A2ATRequestHandlerDecorator:
             if not _otel_compat.is_metric_enabled():
                 return
             duration = time.perf_counter() - started
-            attributes = {ATTR_GEN_AI_OPERATION_NAME: method}
+            attributes = {ATTR_GEN_AI_OPERATION_NAME: method, ATTR_SPAN_SIDE: "server"}
             histogram = _metric_histogram(_METRIC_TASK_DURATION, "s", "A2A-T task request duration")
             if histogram is not None:
                 histogram.record(duration, attributes=attributes)

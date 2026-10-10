@@ -171,6 +171,28 @@ async def test_send_message_entry_span_attributes(exporter: InMemorySpanExporter
     assert span.status.status_code == StatusCode.OK
 
 
+async def test_sync_negotiation_log_fires_when_trace_off(caplog: pytest.LogCaptureFixture) -> None:
+    """§8.1/§4.2：sync 路径 trace-off 时协商日志仍发（entry span 缺席不吞日志）。"""
+    import logging
+
+    config = A2ATObservabilityConfig(trace_enabled=False)
+    result = FakeMessage(
+        {
+            _NEGOTIATION_T_URI: "final accept",
+            "negotiationContext": {"id": "N9", "round": 3, "maxRounds": 5, "performative": "ACCEPT"},
+        },
+        task_id="T26",
+        context_id="C26",
+    )
+    inner = FakeSyncTransport(result=result)
+    decorator = A2ATClientTransportDecorator(inner, config=config)
+
+    with caplog.at_level(logging.DEBUG, logger="a2at.observability"):
+        await decorator.send_message(make_send_request({}, task_id="T26", context_id="C26"), context=FakeContext())
+
+    assert any("negotiation.message" in record.getMessage() for record in caplog.records)
+
+
 async def test_send_message_records_l1_l3_metrics(
     exporter: InMemorySpanExporter, metric_reader: InMemoryMetricReader
 ) -> None:
@@ -183,6 +205,9 @@ async def test_send_message_records_l1_l3_metrics(
     names = _metric_names(metric_reader)
     assert "gen_ai.client.operation.duration" in names
     assert "a2at.task.request.duration" in names
+    task_points = _histogram_point_attributes(metric_reader, "a2at.task.request.duration")
+    assert task_points
+    assert all(p.get("a2at.span.side") == "client" for p in task_points)
     for name in ("gen_ai.client.operation.duration", "a2at.task.request.duration"):
         points = _histogram_point_attributes(metric_reader, name)
         assert points, name
