@@ -5,10 +5,9 @@ SERVER entry spans, wraps the executor for per-event spans and wraps the push se
 no ASGI middleware and no manual OTel setup (the SDK auto-configures Console/OTLP
 exporters on first use when ``A2AT_OBSERVABILITY_ENABLED=true``).
 
-Uses ``LegacyRequestHandler``: a2a-sdk 1.1.2's default ``DefaultRequestHandler`` (V2)
-captures raw ``agent_executor``/``_push_sender`` references at construction time, so the
-decorator's post-construction wraps would be bypassed (see README "a2a-sdk 1.1.x handler
-caveat").
+Uses ``LegacyRequestHandler`` — the request handler shipped by a2a-sdk 1.1.2 (it
+resolves ``agent_executor`` / ``_push_sender`` per attribute access, which is what
+the decorator replaces).
 """
 
 from __future__ import annotations

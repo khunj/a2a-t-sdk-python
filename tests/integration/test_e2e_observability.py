@@ -12,12 +12,12 @@ Requires a2a-sdk integration deps (marker ``a2a``; opt-in via A2AT_TEST_A2A=1).
 Verified against a2a-sdk 1.1.2 structural reality (differs from the unit-test
 stubs):
 
-- LegacyRequestHandler instead of DefaultRequestHandlerV2: the V2 handler's
-  ActiveTaskRegistry captures the raw agent_executor/push_sender references at
-  construction, so post-construction structural wrapping (the executor queue
-  wrap and the push ``_dispatch_notification`` wrap) would be bypassed;
-  LegacyRequestHandler resolves ``self.agent_executor`` / ``self._push_sender``
-  per call, which is what the decorator replaces.
+- ``LegacyRequestHandler`` is the only request handler shipped by
+  a2a-sdk 1.1.2; it resolves ``self.agent_executor`` / ``self._push_sender``
+  per attribute access, which is what the decorator replaces. (The
+  decorator's V2 warning is forward-defense: a future a2a-sdk release whose
+  handler construction captures raw references would bypass
+  post-construction structural wrapping.)
 - Streaming transport/handler methods are async generators: a2a's trace_class
   applies its sync wrapper, so a2a's own protocol spans end at generator
   creation. Because ASGITransport runs the server app inside the client entry
