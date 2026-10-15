@@ -25,7 +25,14 @@ from a2a.server.routes import create_agent_card_routes, create_rest_routes
 from a2a.server.tasks.base_push_notification_sender import BasePushNotificationSender
 from a2a.server.tasks.inmemory_push_notification_config_store import InMemoryPushNotificationConfigStore
 from a2a.server.tasks.inmemory_task_store import InMemoryTaskStore
-from a2a.types import Artifact, TaskArtifactUpdateEvent, TaskState, TaskStatus, TaskStatusUpdateEvent
+from a2a.types import (
+    Artifact,
+    Task,
+    TaskArtifactUpdateEvent,
+    TaskState,
+    TaskStatus,
+    TaskStatusUpdateEvent,
+)
 from a2a.utils.constants import TransportProtocol
 from a2a_t.observability import A2ATRequestHandlerDecorator
 from google.protobuf.json_format import MessageToDict, ParseDict
@@ -41,11 +48,19 @@ def _sample_port() -> int:
 
 
 class EchoExecutor(AgentExecutor):
-    """Emits submitted -> working -> artifact -> completed; mirrors a Task-T streaming flow."""
+    """Emits the initial Task snapshot -> submitted -> working -> artifact -> completed
+    (V2 protocol: the Task snapshot must precede any status event)."""
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         task_id = context.task_id or "T-sample"
         context_id = context.context_id or "C-sample"
+        await event_queue.enqueue_event(
+            Task(
+                id=task_id,
+                context_id=context_id,
+                status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+            )
+        )
         for state in (TaskState.TASK_STATE_SUBMITTED, TaskState.TASK_STATE_WORKING):
             await event_queue.enqueue_event(
                 TaskStatusUpdateEvent(task_id=task_id, context_id=context_id, status=TaskStatus(state=state))
@@ -135,6 +150,13 @@ class NegotiationExecutor(AgentExecutor):
         """Post-agreement task execution: the task is created and runs to completion."""
         task_id = context.task_id or "T-negotiation-agreed"
         context_id = context.context_id or "C-negotiation"
+        await event_queue.enqueue_event(
+            Task(
+                id=task_id,
+                context_id=context_id,
+                status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+            )
+        )
         for state in (TaskState.TASK_STATE_SUBMITTED, TaskState.TASK_STATE_WORKING):
             await event_queue.enqueue_event(
                 TaskStatusUpdateEvent(task_id=task_id, context_id=context_id, status=TaskStatus(state=state))

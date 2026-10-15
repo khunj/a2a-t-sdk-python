@@ -844,17 +844,29 @@ async def test_v2_handler_registry_rebuilt_with_decorated_collaborators(
     assert any("V2" in record.getMessage() and "rebuilt" in record.getMessage() for record in caplog.records)
 
 
-async def test_v2_registry_rebuild_failure_degrades_gracefully(exporter: InMemorySpanExporter) -> None:
+async def test_v2_registry_rebuild_failure_degrades_gracefully(
+    exporter: InMemorySpanExporter, caplog: pytest.LogCaptureFixture
+) -> None:
     """registry 签名不兼容（版本变化）→ WARNING 降级：入口 span 仍工作（spec §8.2）。"""
-    inner = FakeSimpleHandler(result=FakeMessage(metadata={}, task_id="T26b", context_id="C26b"))
-    inner.agent_executor = FakeExecutor(events=[])
+    import logging
+
+    inner = FakeStreamingHandler(FakeExecutor(events=[]))
     inner._push_sender = FakeDispatchPushSender(["https://hook.example"])
     inner._active_task_registry = _StrictRegistry()
 
-    A2ATRequestHandlerDecorator(inner)
+    with caplog.at_level(logging.WARNING, logger="a2at.observability"):
+        A2ATRequestHandlerDecorator(inner)
 
-    assert isinstance(inner.agent_executor, A2ATAgentExecutorDecorator)
-    assert inner._active_task_registry.__class__ is _StrictRegistry
+    assert any("V2 registry rebuild failed" in record.getMessage() for record in caplog.records), (
+        "expected the rebuild-failure WARNING"
+    )
+
+    # D9 test-plan item 5: 入口 span 仍工作——一次流式请求仍产生 SERVER 入口 span
+    decorator = A2ATRequestHandlerDecorator(inner)
+    params = make_send_request({}, task_id="T26c", context_id="C26c")
+    _ = [event async for event in decorator.on_message_send_stream(params, FakeServerCallContext())]
+    entry = [s for s in exporter.get_finished_spans() if s.name == "SendStreamingMessage"]
+    assert len(entry) == 1 and entry[0].kind is SpanKind.SERVER
 
 
 async def test_stream_negotiation_message_creates_server_negotiation_span(

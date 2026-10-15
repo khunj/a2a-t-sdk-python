@@ -1,8 +1,8 @@
-﻿"""End-to-end observability verification for the v3.0 decorator architecture (spec 閹?0.2, assertions 1-10).
+"""End-to-end observability verification for the v3.0 decorator architecture (spec §10.2, assertions 1-10).
 
 In-process wiring: httpx ASGITransport -> Starlette (a2a-python REST routes) ->
 A2ATRequestHandlerDecorator(DefaultRequestHandler(...)) on the server and a real
-a2a ClientFactory client with register_client_factory(factory) on the client 闁?zero business observability code. No ASGI middleware: the server entry span
+a2a ClientFactory client with register_client_factory(factory) on the client —?zero business observability code. No ASGI middleware: the server entry span
 extracts the traceparent from ``ServerCallContext.state["headers"]`` (spec
 appendix #5), which the client transport decorator injected into
 ``context.service_parameters``.
@@ -19,11 +19,11 @@ stubs):
 - Streaming transport/handler methods are async generators: a2a's trace_class
   applies its sync wrapper, so a2a's own protocol spans end at generator
   creation. Because ASGITransport runs the server app inside the client entry
-  span activation, ambient propagation coincides with the traceparent path 闁?  both route through the same client entry span.
+  span activation, ambient propagation coincides with the traceparent path —?  both route through the same client entry span.
 - TaskStatusUpdateEvent has no ``final`` field; the terminal state itself is
   final.
 
-Assertion coverage (spec 閹?0.2 v3 table):
+Assertion coverage (spec §10.2 v3 table):
 
 1/2/3/8 -> test_e2e_trace_continuity_event_spans_and_metrics
 4       -> test_e2e_stream_error_span
@@ -581,7 +581,6 @@ async def test_e2e_push_notification_span(otel_setup: tuple[Any, Any]) -> None:
     assert push_spans
 
     for span in push_spans:
-        print("PUSH-DEBUG attrs:", dict(span.attributes or {}))
         attrs = span.attributes or {}
         assert span.kind is SpanKind.CLIENT
         assert attrs["gen_ai.agent.a2at.push.notification.url"] == "http://push-receiver.test/hook"
@@ -697,3 +696,45 @@ async def test_register_client_factory_decorates_real_factory_transport() -> Non
 
 
 
+
+
+async def test_sample_app_smoke_on_official_handler(otel_setup: tuple[Any, Any]) -> None:
+    """Smoke guard: the observability-sample app must work on the official
+    DefaultRequestHandler — the V2 protocol requires the executor to enqueue
+    the initial Task snapshot before any status event (regression guard for
+    the sample executors, which have no automated coverage otherwise)."""
+    import sys
+    from pathlib import Path as _Path
+
+    sample_src = _Path(__file__).resolve().parents[2] / "a2a-t-sample" / "observability-sample" / "src"
+    sys.path.insert(0, str(sample_src))
+    try:
+        from a2a.types import AgentCard
+        from google.protobuf.json_format import ParseDict
+        from obs_sample.server_main import build_agent_card_payload, build_app
+    finally:
+        sys.path.remove(str(sample_src))
+
+    exporter, _reader = otel_setup
+    app = build_app(scenario="negotiation")
+    card = ParseDict(build_agent_card_payload(8100), AgentCard())
+    client, httpx_client = _make_client(app, card)
+    try:
+        # The sample server matches the Negotiation-T URI WITH the /v1 suffix
+        events = await _send_streaming(client, {_NEG_T_URI + "/v1": "offer"}, context_id="C-smoke")
+    finally:
+        await httpx_client.aclose()
+    assert events and events[-1].HasField("message")
+    await _finalize_abandoned_generators()
+
+    spans = _a2at_spans(exporter.get_finished_spans())
+    client_negotiations = [
+        s for s in spans if s.name == "SendStreamingMessage-negotiation" and s.kind is SpanKind.CLIENT
+    ]
+    server_negotiations = [
+        s for s in spans if s.name == "SendStreamingMessage-negotiation" and s.kind is SpanKind.SERVER
+    ]
+    assert len(client_negotiations) == 1
+    assert len(server_negotiations) == 1
+    assert client_negotiations[0].parent is not None
+    assert server_negotiations[0].parent is not None
