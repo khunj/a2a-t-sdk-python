@@ -123,9 +123,10 @@ export LANGFUSE_BASE_URL="https://us.cloud.langfuse.com"
 
 ## 说明
 
-- 服务端有意使用 a2a-sdk 的 `LegacyRequestHandler`：新版 `DefaultRequestHandler`
-  （a2a-sdk 1.1.x V2）在构造期就捕获了 executor / push-sender 的原始引用，会绕过 SDK
-  的包装器。
+- 服务端使用**官方默认**的 `DefaultRequestHandler`（a2a-sdk 1.1.x 的别名，指向
+  `DefaultRequestHandlerV2`）：可观测装饰器会自动检测 V2 形状，并用装饰后的
+  executor / push sender 重建其任务注册表——per-event 与 push span 在官方 handler
+  上同样生效。（`LegacyRequestHandler` 通过逐属性包装的方式继续受支持。）
 - 推送通知会回环到服务端的 `/push-sink`，因此样例能端到端展示
   `SendMessage-pushNotification` span。
 - 离线验证辅助脚本与样例代码放在一起（`check_*.py`、`verify_langfuse.py`）——它们是

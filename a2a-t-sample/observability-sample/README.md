@@ -128,9 +128,11 @@ Advanced (rarely needed): `A2AT_TRACE_ENABLED`, `A2AT_METRIC_ENABLED`, `A2AT_LOG
 
 ## Notes
 
-- The server uses a2a-sdk's `LegacyRequestHandler` on purpose: the newer
-  `DefaultRequestHandler` (a2a-sdk 1.1.x V2) captures raw executor/push-sender
-  references at construction time, which would bypass the SDK's wrappers.
+- The server uses the **official default** `DefaultRequestHandler` (a2a-sdk 1.1.x alias
+  for `DefaultRequestHandlerV2`): the observability decorator detects the V2 shape and
+  rebuilds its task registry with the decorated executor / push sender, so per-event and
+  push spans work on the official handler too. (`LegacyRequestHandler` remains supported
+  via per-attribute wrapping.)
 - Push notifications are echoed back to the server's `/push-sink` endpoint, which is
   why the sample can show the `SendMessage-pushNotification` span end to end.
 - Offline verification helpers live next to the sample code (`check_*.py`,
