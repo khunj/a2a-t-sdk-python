@@ -113,7 +113,7 @@ export LANGFUSE_BASE_URL="https://us.cloud.langfuse.com"
 | `A2AT_OBSERVABILITY_ENABLED` | `true` | 总开关——`false` 时 SDK 完全透明 |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | 未设置 | 把 trace/指标/日志发到 OTLP collector，而不是控制台 |
 | `A2AT_CONSOLE_EXPORTER` | `true` | `false` 关闭 dev 模式控制台兜底（stdout 不再输出 JSON） |
-| `OTEL_SERVICE_NAME` | `a2a-t-agent` | 本进程在后端的名称 |
+| `OTEL_SERVICE_NAME`（或 `A2AT_SERVICE_NAME`） | `a2a-t-agent` | 本进程在后端的名称 |
 | `A2AT_OBS_SAMPLE_PORT` | `8100` | 样例服务端端口 |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` | 未设置 | 启用 Langfuse 后端 |
 

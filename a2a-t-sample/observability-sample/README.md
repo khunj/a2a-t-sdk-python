@@ -118,7 +118,7 @@ Commonly used:
 | `A2AT_OBSERVABILITY_ENABLED` | `true` | Master switch — `false` makes the SDK fully transparent |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset)* | Send spans/metrics/logs to an OTLP collector instead of the console |
 | `A2AT_CONSOLE_EXPORTER` | `true` | `false` disables the dev-mode console fallback (no stdout JSON) |
-| `OTEL_SERVICE_NAME` | `a2a-t-agent` | How this process is named in the backend |
+| `OTEL_SERVICE_NAME` (or `A2AT_SERVICE_NAME`) | `a2a-t-agent` | How this process is named in the backend |
 | `A2AT_OBS_SAMPLE_PORT` | `8100` | Sample server port |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` | *(unset)* | Enable the Langfuse backend |
 
