@@ -534,12 +534,16 @@ class A2ATPushSenderDecorator:
         if not self._decorator_active():
             return await self._inner.send_notification(task_id, event)
         info = classify_event(_unwrap(event))
-        self._log_push(task_id, info)
+        dispatch_bearing = _safe_getattr(self._inner, "_dispatch_notification") is not None
+        if not dispatch_bearing:
+            # Only the plain-ABC path logs here: dispatch-bearing inners emit one
+            # log per push_info inside their wrapped _dispatch_notification.
+            self._log_push(task_id, info)
         # V2/core senders route fanout through ``_dispatch_notification`` (whose
         # wrapper already emits the per-push_info span with the URL) - forward
         # without a second span. Plain ABC senders (no dispatch method) get the
         # span here, with the URL read off the event (when present).
-        if _safe_getattr(self._inner, "_dispatch_notification") is not None:
+        if dispatch_bearing:
             return await self._inner.send_notification(task_id, event)
         span = self._start_push_span_for_url(task_id, info, _safe_getattr(event, "url"))
         cm: Any = _safe_use_span(span)
@@ -657,7 +661,6 @@ class A2ATRequestHandlerDecorator:
                 self._inner.agent_executor = A2ATAgentExecutorDecorator(executor, config=self._config)
             except Exception:  # noqa: BLE001
                 logger.warning("a2at: failed to wrap agent_executor", exc_info=True)
-        push_sender = _safe_getattr(self._inner, "_push_sender")
         if push_sender is not None and not isinstance(push_sender, A2ATPushSenderDecorator):
             try:
                 decorator = A2ATPushSenderDecorator(push_sender, config=self._config)
@@ -675,7 +678,11 @@ class A2ATRequestHandlerDecorator:
             if push_sender is not None and not isinstance(push_sender, A2ATPushSenderDecorator):
                 push_sender = A2ATPushSenderDecorator(push_sender, config=self._config)
                 self._inner._push_sender = push_sender
-                push_sender.install_dispatch_wrapper()
+                if not push_sender.install_dispatch_wrapper():
+                    logger.debug(
+                        "a2at: V2 push sender has no _dispatch_notification; "
+                        "push spans will be emitted via the send_notification surface"
+                    )
             registry = _safe_getattr(self._inner, "_active_task_registry")
             registry_cls = type(registry)
             self._inner._active_task_registry = registry_cls(
