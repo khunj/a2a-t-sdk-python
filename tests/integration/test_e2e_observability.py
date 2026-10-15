@@ -1,9 +1,8 @@
-"""End-to-end observability verification for the v3.0 decorator architecture (spec §10.2, assertions 1-10).
+﻿"""End-to-end observability verification for the v3.0 decorator architecture (spec 閹?0.2, assertions 1-10).
 
 In-process wiring: httpx ASGITransport -> Starlette (a2a-python REST routes) ->
-A2ATRequestHandlerDecorator(LegacyRequestHandler(...)) on the server and a real
-a2a ClientFactory client with register_client_factory(factory) on the client —
-zero business observability code. No ASGI middleware: the server entry span
+A2ATRequestHandlerDecorator(DefaultRequestHandler(...)) on the server and a real
+a2a ClientFactory client with register_client_factory(factory) on the client 闁?zero business observability code. No ASGI middleware: the server entry span
 extracts the traceparent from ``ServerCallContext.state["headers"]`` (spec
 appendix #5), which the client transport decorator injected into
 ``context.service_parameters``.
@@ -12,21 +11,19 @@ Requires a2a-sdk integration deps (marker ``a2a``; opt-in via A2AT_TEST_A2A=1).
 Verified against a2a-sdk 1.1.2 structural reality (differs from the unit-test
 stubs):
 
-- LegacyRequestHandler instead of DefaultRequestHandlerV2: the V2 handler's
-  ActiveTaskRegistry captures the raw agent_executor/push_sender references at
-  construction, so post-construction structural wrapping (the executor queue
-  wrap and the push ``_dispatch_notification`` wrap) would be bypassed;
-  LegacyRequestHandler resolves ``self.agent_executor`` / ``self._push_sender``
-  per call, which is what the decorator replaces.
+- The official default ``DefaultRequestHandler`` (a2a-sdk 1.1.x alias for
+  ``DefaultRequestHandlerV2``) is covered here: the decorator detects the V2
+  ``_active_task_registry`` and rebuilds it with the decorated executor /
+  push sender, so per-event and push spans work on the official handler.
+  (``LegacyRequestHandler`` remains supported for older a2a-sdk lineages.)
 - Streaming transport/handler methods are async generators: a2a's trace_class
   applies its sync wrapper, so a2a's own protocol spans end at generator
   creation. Because ASGITransport runs the server app inside the client entry
-  span activation, ambient propagation coincides with the traceparent path —
-  both route through the same client entry span.
+  span activation, ambient propagation coincides with the traceparent path 闁?  both route through the same client entry span.
 - TaskStatusUpdateEvent has no ``final`` field; the terminal state itself is
   final.
 
-Assertion coverage (spec §10.2 v3 table):
+Assertion coverage (spec 閹?0.2 v3 table):
 
 1/2/3/8 -> test_e2e_trace_continuity_event_spans_and_metrics
 4       -> test_e2e_stream_error_span
@@ -96,10 +93,10 @@ def _agent_card(push: bool) -> Any:
 
 
 def _build_app(executor_kind: str, *, config: Any = None, push: bool = False) -> tuple[Any, Any]:
-    """Starlette app: A2ATRequestHandlerDecorator(LegacyRequestHandler(...)) + a2a REST routes."""
+    """Starlette app: A2ATRequestHandlerDecorator(DefaultRequestHandler(...)) + a2a REST routes."""
     import httpx
     from a2a.server.agent_execution import AgentExecutor
-    from a2a.server.request_handlers.default_request_handler import LegacyRequestHandler
+    from a2a.server.request_handlers import DefaultRequestHandler
     from a2a.server.routes import create_agent_card_routes, create_rest_routes
     from a2a.server.tasks.base_push_notification_sender import BasePushNotificationSender
     from a2a.server.tasks.inmemory_push_notification_config_store import InMemoryPushNotificationConfigStore
@@ -108,6 +105,7 @@ def _build_app(executor_kind: str, *, config: Any = None, push: bool = False) ->
         Artifact,
         Message,
         Role,
+        Task,
         TaskArtifactUpdateEvent,
         TaskState,
         TaskStatus,
@@ -121,6 +119,14 @@ def _build_app(executor_kind: str, *, config: Any = None, push: bool = False) ->
         async def execute(self, context: Any, event_queue: Any) -> None:
             task_id = context.task_id
             context_id = context.context_id
+            # V2 protocol: the executor enqueues the initial Task snapshot first
+            await event_queue.enqueue_event(
+                Task(
+                    id=task_id,
+                    context_id=context_id,
+                    status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+                )
+            )
             for state in (TaskState.TASK_STATE_SUBMITTED, TaskState.TASK_STATE_WORKING):
                 await event_queue.enqueue_event(
                     TaskStatusUpdateEvent(task_id=task_id, context_id=context_id, status=TaskStatus(state=state))
@@ -185,7 +191,7 @@ def _build_app(executor_kind: str, *, config: Any = None, push: bool = False) ->
         handler_kwargs["push_config_store"] = push_store
         handler_kwargs["push_sender"] = BasePushNotificationSender(push_http, push_store)
 
-    handler = LegacyRequestHandler(
+    handler = DefaultRequestHandler(
         agent_executor=executors[executor_kind],
         task_store=InMemoryTaskStore(),
         agent_card=agent_card,
@@ -377,7 +383,7 @@ async def test_e2e_trace_continuity_event_spans_and_metrics(otel_setup: tuple[An
         events = await _send_streaming(client, {_TASK_T_URI: "prompt-text"}, context_id="C-e2e")
     finally:
         await httpx_client.aclose()
-    assert len(events) == 4
+    assert len(events) == 5  # V2: + initial Task snapshot
 
     spans = _a2at_spans(exporter.get_finished_spans())
     client_entry = _find(spans, "SendStreamingMessage", side="client")
@@ -419,8 +425,8 @@ async def test_e2e_trace_continuity_event_spans_and_metrics(otel_setup: tuple[An
         for span in spans
         if span.name == "SendStreamingMessage-event" and span.kind is SpanKind.SERVER
     ]
-    assert len(client_events) == 4
-    assert len(server_events) == 4
+    assert len(client_events) == 5
+    assert len(server_events) == 5
     assert all(span.kind is SpanKind.CLIENT for span in client_events)
     assert all(
         span.links and link.context.span_id == client_entry.context.span_id for span in client_events for link in span.links
@@ -436,6 +442,7 @@ async def test_e2e_trace_continuity_event_spans_and_metrics(otel_setup: tuple[An
         "status",
         "artifact",
         "completed",
+        "task",
     }
 
     # (8) metrics: L1 gen_ai histogram (client) + L3 a2at histogram with client AND server side attribution
@@ -566,7 +573,7 @@ async def test_e2e_push_notification_span(otel_setup: tuple[Any, Any]) -> None:
         )
     finally:
         await httpx_client.aclose()
-    assert len(events) == 4
+    assert len(events) == 5  # V2: + initial Task snapshot
 
     spans = _a2at_spans(exporter.get_finished_spans())
     server_entry = _find(spans, "SendStreamingMessage", side="server")
@@ -574,6 +581,7 @@ async def test_e2e_push_notification_span(otel_setup: tuple[Any, Any]) -> None:
     assert push_spans
 
     for span in push_spans:
+        print("PUSH-DEBUG attrs:", dict(span.attributes or {}))
         attrs = span.attributes or {}
         assert span.kind is SpanKind.CLIENT
         assert attrs["gen_ai.agent.a2at.push.notification.url"] == "http://push-receiver.test/hook"
@@ -596,7 +604,7 @@ async def test_e2e_payload_attributes_and_log_trace_context(
             events = await _send_streaming(client, {_TASK_T_URI: "prompt-text"}, context_id="C-log")
         finally:
             await httpx_client.aclose()
-    assert len(events) == 4
+    assert len(events) == 5  # V2: + initial Task snapshot
 
     spans = _a2at_spans(exporter.get_finished_spans())
     client_entry = _find(spans, "SendStreamingMessage", side="client")
@@ -637,7 +645,7 @@ async def test_e2e_master_switch_off(
             events = await _send_streaming(client, {_TASK_T_URI: "prompt"}, context_id="C-off")
         finally:
             await httpx_client.aclose()
-    assert len(events) == 4
+    assert len(events) == 5  # V2: + initial Task snapshot
 
     spans = exporter.get_finished_spans()
     assert spans
@@ -684,3 +692,8 @@ async def test_register_client_factory_decorates_real_factory_transport() -> Non
         assert isinstance(client2._transport._inner, RestTransport)
     finally:
         await httpx_client.aclose()
+
+
+
+
+
